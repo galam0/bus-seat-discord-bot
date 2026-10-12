@@ -189,13 +189,16 @@ def build_network(master_rows: list[dict], line_rows: list[dict]) -> Network:
     # 좌표: 역 코드로 먼저, 안 되면 (이름, 노선)으로
     coord_by_id: dict[str, tuple[float, float]] = {}
     coord_by_name: dict[tuple[str, str], tuple[float, float]] = {}
+    coord_by_base: dict[str, tuple[float, float]] = {}  # 다른 노선의 같은 역 좌표라도 빌려 쓴다
     for r in master_rows:
         try:
             ll = (float(r["LAT"]), float(r["LOT"]))
         except (KeyError, TypeError, ValueError):
             continue
         coord_by_id[str(r.get("BLDN_ID", "")).strip()] = ll
-        coord_by_name[(clean_name(str(r.get("BLDN_NM", ""))), line_name(str(r.get("ROUTE", ""))))] = ll
+        nm = clean_name(str(r.get("BLDN_NM", "")))
+        coord_by_name[(nm, line_name(str(r.get("ROUTE", ""))))] = ll
+        coord_by_base.setdefault(base_name(nm), ll)
 
     nodes: dict[str, Node] = {}
     for r in line_rows:
@@ -204,7 +207,7 @@ def build_network(master_rows: list[dict], line_rows: list[dict]) -> Network:
             continue
         name = clean_name(str(r.get("STATION_NM", "")))
         line = line_name(str(r.get("LINE_NUM", "")))
-        ll = coord_by_id.get(sid) or coord_by_name.get((name, line))
+        ll = coord_by_id.get(sid) or coord_by_name.get((name, line)) or coord_by_base.get(base_name(name))
         nodes[sid] = Node(sid, name, line, ll[0] if ll else None, ll[1] if ll else None,
                           str(r.get("FR_CODE", "")).strip())
 
@@ -452,6 +455,8 @@ class SubwayData:
             self.net = build_network(master, info)
             self.error = None
             log.info("지하철 데이터(%d번째 키): %s", n, describe(self.net))
+            missing = sorted(f"{x.name}({x.line})" for x in self.net.nodes.values() if x.lat is None)
+            log.info("좌표 없는 역 %d개: %s", len(missing), ", ".join(missing))
             for line in sorted(self.net.lines, key=line_sort_key):  # 연결 확인용
                 pairs = ", ".join(f"{self.net.nodes[a].name}-{self.net.nodes[b].name}"
                                   for a, b in self.net.lines[line])
