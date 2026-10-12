@@ -91,6 +91,21 @@ class TravelState:
                     break
             except Exception as e:
                 log.warning("확인 실시간 도착(%d번째 키) 실패: %r", n, e)
+        # 경로 방향 확인용 (실제 데이터)
+        if self._loading:
+            await asyncio.wait({self._loading}, timeout=30)
+        if self.subway.net is not None:
+            for a, b in (("강남", "홍대입구"), ("홍대입구", "강남"), ("서울", "수원"), ("용답", "강남"),
+                         ("김포공항", "서울"), ("응암", "공덕")):
+                r = find_route(self.subway.net, a, b)
+                if r:
+                    log.info("확인 경로 %s->%s: %s", a, b,
+                             " | ".join(f"{l.line} {l.stations[0]}->{l.stations[-1]} [{l.heading}]" for l in r.legs))
+        if self.realtime_keys:
+            data = await fetch_realtime("강남")
+            if data:
+                seen = {(a.line, a.direction, a.heading) for a in parse_arrivals(data)}
+                log.info("확인 실시간 강남 방향: %s", "; ".join(f"{l}/{d}/{h}" for l, d, h in sorted(seen))[:800])
         if self.kma_key:
             try:
                 lat, lon = CITIES["서울"]
