@@ -29,6 +29,12 @@ def _sort_key(hms: str) -> int:
     return h * 60 + m
 
 
+def _clock(hms: str) -> str:
+    """'24:46:00' -> '00:46' (자정 넘은 시각을 시계 표기로)."""
+    h, m = hms.split(":")[:2]
+    return f"{int(h) % 24:02d}:{m}"
+
+
 @dataclass
 class Departure:
     time: str  # 'HH:MM'
@@ -64,8 +70,8 @@ def summarize(rows: list[dict], label: str, n_last: int = 3) -> DirectionTimes:
         dest = str(r.get("SUBWAYENAME") or "").strip()
         if not dest or dest == str(r.get("STATION_NM") or ""):
             continue  # 이 역이 종착인 열차는 탈 수 없음
-        deps.append(Departure(t[:5], dest, str(r.get("EXPRESS_YN") or "") in ("D", "Y", "E")))
-    deps.sort(key=lambda d: _sort_key(d.time))
+        deps.append(Departure(_clock(t), dest, str(r.get("EXPRESS_YN") or "") in ("D", "Y", "E")))
+    deps.sort(key=lambda d: (_sort_key(d.time), d.time))
     common = [d for d, _ in Counter(d.dest for d in deps).most_common(2)]
     return DirectionTimes(label, common, deps[0] if deps else None, list(reversed(deps[-n_last:])), len(deps))
 

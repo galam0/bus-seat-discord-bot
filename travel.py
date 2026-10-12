@@ -89,7 +89,8 @@ class TravelState:
                 book = TripBook(NeonStore(url, self.session))
                 await book.load()
                 trips_ui.book = book
-                log.info("여행 저장소: DB 연결됨, 여행 %d개", len(book.trips))
+                log.info("여행 저장소: DB 연결됨, 여행 %d개, 매개변수 확인 %s", len(book.trips),
+                         await book.store.check())
                 return
             except Exception as e:
                 log.warning("여행 저장소: DB 연결 실패, 임시 저장으로 (%s)", str(e)[:200])

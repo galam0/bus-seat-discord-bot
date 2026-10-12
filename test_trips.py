@@ -215,7 +215,7 @@ class TimetableTest(unittest.TestCase):
         rows = [
             {"LEFTTIME": "05:36:00", "SUBWAYENAME": "성수", "STATION_NM": "강남", "EXPRESS_YN": "G"},
             {"LEFTTIME": "23:50:00", "SUBWAYENAME": "성수", "STATION_NM": "강남"},
-            {"LEFTTIME": "00:12:00", "SUBWAYENAME": "신도림", "STATION_NM": "강남"},
+            {"LEFTTIME": "24:12:00", "SUBWAYENAME": "신도림", "STATION_NM": "강남"},  # 서울시는 24시 표기
             {"LEFTTIME": "00:30:00", "SUBWAYENAME": "강남", "STATION_NM": "강남"},  # 이 역 종착 -> 못 탐
             {"LEFTTIME": "00:00:00", "SUBWAYENAME": "성수", "STATION_NM": "강남"},  # 시각 없음
         ]

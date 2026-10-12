@@ -163,6 +163,11 @@ class NeonStore:
                 last = e
         raise RuntimeError(f"DB 요청 실패: {last}")
 
+    async def check(self) -> str:
+        """쓰기 없이 매개변수 전달까지 확인 (정수·JSON)."""
+        rows = await self._sql("SELECT $1::bigint AS a, ($2::jsonb)->>'x' AS b", [5, json.dumps({"x": "가"})])
+        return f"{rows[0]['a']}/{rows[0]['b']}"
+
     async def setup(self):
         await self._sql("CREATE TABLE IF NOT EXISTS trips (id BIGSERIAL PRIMARY KEY, guild_id TEXT NOT NULL, "
                         "data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())", [])
