@@ -448,12 +448,20 @@ class TravelNewCommandsTest(unittest.TestCase):
         s = self.travel.state
         s.session = MagicMock()
         s.session.get = MagicMock(return_value=_Resp(dust))
-        with patch.object(self.travel, "fetch_forecast", AsyncMock(return_value=fc)):
+        real = self.travel.render_weather
+        spy = MagicMock(side_effect=real)
+        with patch.object(self.travel, "fetch_forecast", AsyncMock(return_value=fc)), \
+                patch.object(self.travel, "render_weather", spy):
             i = fake_interaction()
             run(self.travel.send_weather(i, "제주"))  # 여행지도 됨
-        embed = i.followup.send.await_args.kwargs["embed"]
-        self.assertIn("제주 날씨", embed.title)
-        self.assertTrue(any("좋음" in v for _, v in embed.fields))
+        kw = i.followup.send.await_args.kwargs
+        self.assertIn("제주 날씨", kw["embed"].title)
+        self.assertEqual(kw["file"].filename, "weather.png")
+        dust_arg = spy.call_args.args[4]
+        self.assertEqual((dust_arg.pm10, dust_arg.pm25), (20.0, 8.0))
+        # 이미지가 안 될 때 쓰는 글자 버전에도 미세먼지가 들어감
+        text = self.travel.weather_text_embed("제주", datetime(2099, 1, 1), fc.slots[:8], [], dust_arg, "")
+        self.assertTrue(any("좋음" in v for _, v in text.fields))
 
 
 if __name__ == "__main__":

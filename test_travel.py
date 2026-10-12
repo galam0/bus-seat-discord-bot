@@ -352,8 +352,23 @@ class TravelCommandTest(unittest.TestCase):
         with patch.object(self.travel, "fetch_forecast", AsyncMock(return_value=fc)):
             i = fake_interaction()
             run(self.travel.send_weather(i, "서울"))
-        embed = i.followup.send.await_args.kwargs["embed"]
-        self.assertIn("서울 날씨", embed.title)
+        kw = i.followup.send.await_args.kwargs
+        self.assertIn("서울 날씨", kw["embed"].title)
+        self.assertEqual(kw["file"].filename, "weather.png")
+        self.assertEqual(kw["embed"].image, "attachment://weather.png")
+
+    def test_weather_image_fallback(self):
+        s = self.travel.state
+        s.kma_key = "k"
+        from weather import Slot
+        fc = Forecast([Slot(datetime(2099, 1, 1, h), 5.0, "☁️", "흐림", 0) for h in range(24)], {})
+        with patch.object(self.travel, "fetch_forecast", AsyncMock(return_value=fc)), \
+                patch.object(self.travel, "render_weather", MagicMock(side_effect=OSError("font"))):
+            i = fake_interaction()
+            run(self.travel.send_weather(i, "서울"))
+        kw = i.followup.send.await_args.kwargs
+        self.assertNotIn("file", kw)
+        self.assertEqual(kw["embed"].fields[0][0], "3시간 간격")
 
     def test_weather_no_key(self):
         self.travel.state.kma_key = None

@@ -17,6 +17,7 @@ import timetable
 import tour
 import trips_ui
 from dust import fetch_dust
+from weather_images import render_weather
 import congestion
 import roulette
 from trips import MemoryStore, NeonStore, TripBook
@@ -381,6 +382,39 @@ async def send_weather(interaction: discord.Interaction, city: str):
     if not slots:
         await interaction.followup.send("예보가 비어 있어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
         return
+    daily = []
+    for d, (lo, hi) in sorted(fc.daily.items())[:3]:
+        dt = datetime.strptime(d, "%Y%m%d")
+        label = "오늘" if dt.date() == now.date() else f"{dt.month}/{dt.day}({WEEK[dt.weekday()]})"
+        daily.append((label, lo, hi))
+    dust, dust_note = None, ""
+    if dust_task:
+        try:
+            dust = await dust_task
+        except Exception as e:
+            log.warning("미세먼지 실패: %s", str(e)[:150])
+            dust_note = "미세먼지 정보를 못 받았어요 (에어코리아 활용신청을 확인해 주세요)"
+    else:
+        dust_note = "이 지역은 미세먼지 정보가 없어요"
+    first = slots[0]
+    try:
+        png = await asyncio.to_thread(render_weather, city, now.replace(tzinfo=None), slots, daily, dust, dust_note)
+    except Exception:
+        log.exception("날씨 이미지 실패")
+        await interaction.followup.send(embed=weather_text_embed(city, now, slots, daily, dust, dust_note))
+        return
+    t = f" · {first.temp:.0f}°" if first.temp is not None else ""
+    embed = discord.Embed(title=f"{first.sky} {city} 날씨", description=f"**{first.text}**{t}", color=0x5B8CFF)
+    embed.set_image(url=f"attachment://{WEATHER_IMAGE}")
+    embed.set_footer(text="기상청 단기예보 · 에어코리아 · 도시 중심 기준")
+    await interaction.followup.send(embed=embed, file=discord.File(png, filename=WEATHER_IMAGE))
+
+
+WEATHER_IMAGE = "weather.png"
+
+
+def weather_text_embed(city, now, slots, daily, dust, dust_note) -> discord.Embed:
+    """이미지를 못 만들 때 쓰는 글자 버전."""
     first = slots[0]
     embed = discord.Embed(title=f"{first.sky} {city} 날씨",
                           description=f"**{first.text}** · {first.temp:.0f}°" if first.temp is not None else first.text,
@@ -392,22 +426,16 @@ async def send_weather(interaction: discord.Interaction, city: str):
         pop = f" · 💧{s.pop}%" if s.pop else ""
         rows.append(f"`{day}{s.when.hour:02d}시` {s.sky} {t}{pop}")
     embed.add_field(name="3시간 간격", value="\n".join(rows), inline=False)
-    for d, (lo, hi) in sorted(fc.daily.items())[:3]:
-        dt = datetime.strptime(d, "%Y%m%d")
-        label = "오늘" if dt.date() == now.date() else f"{dt.month}/{dt.day}({WEEK[dt.weekday()]})"
+    for label, lo, hi in daily:
         lo_t = f"{lo:.0f}°" if lo is not None else "-"
         hi_t = f"{hi:.0f}°" if hi is not None else "-"
         embed.add_field(name=label, value=f"최저 {lo_t} / 최고 {hi_t}", inline=True)
-    if dust_task:
-        try:
-            dust = await dust_task
-            embed.add_field(name=f"공기 · {dust.area}", value=dust.text(), inline=False)
-        except Exception as e:
-            log.warning("미세먼지 실패: %s", str(e)[:150])
-            embed.add_field(name="공기", value="미세먼지 정보를 못 받았어요 (에어코리아 활용신청을 확인해 주세요)",
-                            inline=False)
+    if dust:
+        embed.add_field(name=f"공기 · {dust.area}", value=dust.text(), inline=False)
+    elif dust_note:
+        embed.add_field(name="공기", value=dust_note, inline=False)
     embed.set_footer(text="기상청 단기예보 · 에어코리아 · 도시 중심 기준")
-    await interaction.followup.send(embed=embed)
+    return embed
 
 
 # ---------------------------------------------------------------- 관광
