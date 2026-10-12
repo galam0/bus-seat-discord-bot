@@ -380,34 +380,43 @@ def describe(net: Network) -> str:
 # ---------------------------------------------------------------- 불러오기
 
 class SubwayData:
-    """API 키로 한 번 받아서 메모리에 둔다."""
+    """API 키로 한 번 받아서 메모리에 둔다. 키를 여러 개 주면 되는 것을 쓴다."""
 
-    def __init__(self, key: str | None):
-        self.key = key
+    def __init__(self, keys):
+        if isinstance(keys, str) or keys is None:
+            keys = [keys]
+        self.keys = [k for k in dict.fromkeys(keys) if k]
         self.net: Network | None = None
         self.error: str | None = None
+
+    @property
+    def key(self) -> str | None:
+        return self.keys[0] if self.keys else None
 
     @property
     def ready(self) -> bool:
         return self.net is not None
 
     async def load(self, session) -> None:
-        if not self.key:
+        if not self.keys:
             self.error = "서울시 API 키(SEOUL_API_KEY)가 아직 없어요."
             return
-        try:
-            master = await _fetch_rows(session, self.key, "subwayStationMaster")
-            info = await _fetch_rows(session, self.key, "SearchSTNBySubwayLineInfo")
+        for n, key in enumerate(self.keys, 1):
+            try:
+                master = await _fetch_rows(session, key, "subwayStationMaster")
+                info = await _fetch_rows(session, key, "SearchSTNBySubwayLineInfo")
+            except Exception as e:
+                log.warning("지하철 데이터: %d번째 키로 실패 (%r)", n, e)
+                continue
             self.net = build_network(master, info)
             self.error = None
-            log.info("지하철 데이터: %s", describe(self.net))
+            log.info("지하철 데이터(%d번째 키): %s", n, describe(self.net))
             for line in sorted(self.net.lines, key=line_sort_key):  # 연결 확인용
                 pairs = ", ".join(f"{self.net.nodes[a].name}-{self.net.nodes[b].name}"
                                   for a, b in self.net.lines[line])
                 log.info("연결 %s: %s", line, pairs[:3500])
-        except Exception as e:
-            self.error = "지하철 데이터를 받아오지 못했어요. 잠시 후 다시 시도해 주세요."
-            log.exception("지하철 데이터 불러오기 실패: %r", e)
+            return
+        self.error = "지하철 데이터를 받아오지 못했어요. 서울시 일반 인증키가 맞는지 확인해 주세요."
 
 
 async def _fetch_rows(session, key: str, service: str) -> list[dict]:
@@ -444,6 +453,11 @@ class Arrival:
     message: str  # '3분 후 (OO)' / '전역 도착'
     seconds: int
     express: bool
+
+
+def realtime_code(data: dict) -> str:
+    """실시간 API 결과 코드. INFO-000 정상, INFO-200 데이터 없음, 그 밖은 키 오류 등."""
+    return str(data.get("code") or (data.get("errorMessage") or {}).get("code") or "")
 
 
 def parse_arrivals(data: dict) -> list[Arrival]:

@@ -93,6 +93,33 @@ class NetworkTest(unittest.TestCase):
         self.assertIsNotNone(find_route(n, "을지로입구", "을지로4가"))
 
 
+class SubwayLoadTest(unittest.TestCase):
+    def test_tries_next_key(self):
+        from subway import SubwayData
+        import subway as sw
+
+        calls = []
+
+        async def fake_fetch(session, key, service):
+            calls.append(key)
+            if key == "bad":
+                raise RuntimeError("INFO-100")
+            return master_rows() if service == "subwayStationMaster" else line_rows()
+
+        d = SubwayData(["bad", "good", None, "good"])
+        self.assertEqual(d.keys, ["bad", "good"])
+        with patch.object(sw, "_fetch_rows", fake_fetch):
+            run(d.load(None))
+        self.assertTrue(d.ready)
+        self.assertEqual(calls, ["bad", "good", "good"])
+
+    def test_no_keys(self):
+        from subway import SubwayData
+        d = SubwayData([None, ""])
+        run(d.load(None))
+        self.assertIn("SEOUL_API_KEY", d.error)
+
+
 class ImageTest(unittest.TestCase):
     def setUp(self):
         try:
@@ -196,13 +223,13 @@ class TravelCommandTest(unittest.TestCase):
     def setUp(self):
         import travel
         self.travel = travel
-        self.saved = (travel.state.subway.net, travel.state.realtime_key, travel.state.kma_key,
+        self.saved = (travel.state.subway.net, list(travel.state.realtime_keys), travel.state.kma_key,
                       travel.state.session)
         travel.state.subway.net = net()
 
     def tearDown(self):
         s = self.travel.state
-        s.subway.net, s.realtime_key, s.kma_key, s.session = self.saved
+        s.subway.net, s.realtime_keys, s.kma_key, s.session = self.saved
 
     def test_route_sends_image_and_buttons(self):
         i = fake_interaction()
@@ -232,7 +259,7 @@ class TravelCommandTest(unittest.TestCase):
 
     def test_arrivals(self):
         s = self.travel.state
-        s.realtime_key = "k"
+        s.realtime_keys = ["k"]
         s.session = MagicMock()
         s.session.get = MagicMock(return_value=_Resp(REALTIME_SAMPLE))
         i = fake_interaction()
@@ -241,8 +268,19 @@ class TravelCommandTest(unittest.TestCase):
         self.assertEqual([f[0] for f in embed.fields], ["1호선", "경의중앙선"])
         self.assertIn("%EC%84%9C%EC%9A%B8", s.session.get.call_args.args[0])  # 역 이름 인코딩
 
+    def test_arrivals_falls_back_to_other_key(self):
+        s = self.travel.state
+        s.realtime_keys = ["wrong", "right"]
+        bad = {"status": 500, "code": "INFO-100", "message": "인증키가 유효하지 않습니다."}
+        s.session = MagicMock()
+        s.session.get = MagicMock(side_effect=[_Resp(bad), _Resp(REALTIME_SAMPLE)])
+        i = fake_interaction()
+        run(self.travel.send_arrivals(i, "서울"))
+        self.assertEqual(len(i.followup.send.await_args.kwargs["embed"].fields), 2)
+        self.assertEqual(s.realtime_keys, ["right", "wrong"])  # 되는 키가 앞으로
+
     def test_arrivals_no_key(self):
-        self.travel.state.realtime_key = None
+        self.travel.state.realtime_keys = []
         i = fake_interaction()
         run(self.travel.send_arrivals(i, "서울"))
         self.assertIn("SEOUL_SUBWAY_KEY", i.response.send_message.await_args.args[0])

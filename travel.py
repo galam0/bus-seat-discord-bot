@@ -10,7 +10,8 @@ import discord
 from discord import app_commands
 
 from cities import CITIES
-from subway import REALTIME, REALTIME_ALIAS, SubwayData, find_route, line_color, line_sort_key, parse_arrivals
+from subway import (REALTIME, REALTIME_ALIAS, SubwayData, find_route, line_color, line_sort_key,
+                    parse_arrivals, realtime_code)
 from weather import fetch_forecast, pick_slots
 
 log = logging.getLogger("seatbot.travel")
@@ -59,8 +60,10 @@ def match_names(names, current: str, limit: int = 25) -> list[str]:
 class TravelState:
     def __init__(self):
         self.session = None
-        self.subway = SubwayData(os.getenv("SEOUL_API_KEY"))
-        self.realtime_key = os.getenv("SEOUL_SUBWAY_KEY")
+        # 두 서울시 키를 어느 칸에 넣어도 되게: 되는 키를 찾아 쓴다
+        general, metro = os.getenv("SEOUL_API_KEY"), os.getenv("SEOUL_SUBWAY_KEY")
+        self.subway = SubwayData([general, metro])
+        self.realtime_keys = [k for k in dict.fromkeys([metro, general]) if k]
         self.kma_key = os.getenv("KMA_API_KEY")
         self._loading: asyncio.Task | None = None
 
@@ -195,17 +198,28 @@ async def subway_map(interaction: discord.Interaction, line: str | None):
 
 
 async def send_arrivals(interaction: discord.Interaction, station: str, ephemeral: bool = False):
-    if not state.realtime_key:
+    if not state.realtime_keys:
         await interaction.response.send_message("⚠️ 실시간 지하철 키(SEOUL_SUBWAY_KEY)가 아직 없어요.", ephemeral=True)
         return
     await interaction.response.defer(thinking=True, ephemeral=ephemeral)
     name = REALTIME_ALIAS.get(station, station)
-    url = REALTIME.format(key=state.realtime_key, name=quote(name))
-    try:
-        async with state.session.get(url) as r:
-            data = await r.json(content_type=None)
-    except Exception:
-        log.exception("실시간 도착 실패")
+    data = None
+    for n, key in enumerate(list(state.realtime_keys), 1):
+        url = REALTIME.format(key=key, name=quote(name))
+        try:
+            async with state.session.get(url) as r:
+                data = await r.json(content_type=None)
+        except Exception:
+            log.exception("실시간 도착 실패")
+            data = None
+            continue
+        if realtime_code(data) in ("INFO-000", "INFO-200", ""):
+            if n > 1:  # 되는 키를 앞으로
+                state.realtime_keys.remove(key)
+                state.realtime_keys.insert(0, key)
+            break
+        log.warning("실시간 도착: %d번째 키 거절 (%s)", n, realtime_code(data))
+    if data is None:
         await interaction.followup.send("실시간 정보를 받아오지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
         return
     arrivals = parse_arrivals(data)
