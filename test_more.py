@@ -373,7 +373,7 @@ class FoodTest(unittest.TestCase):
         self.assertEqual(kw["embed"].title, "🍽️ 전주에서 뭐 먹지?")
         self.assertIn("3곳 중", kw["embed"].footer)
         labels = [b.label for b in kw["view"].children]
-        self.assertEqual(labels, ["다시 뽑기", "지도", "근처 맛집 목록"])
+        self.assertEqual(labels, ["다시 뽑기", "지도", "근처 맛집 목록", "카카오맵에서 근처 맛집 더 보기"])
         self.assertTrue(kw["view"].children[1].url.startswith("https://map.kakao.com/link/search/"))
         first = kw["view"].seen
         seen_titles = set(first)
@@ -393,6 +393,22 @@ class FoodTest(unittest.TestCase):
         i = fake_interaction()
         run(self.travel.send_food(i, "전주"))
         self.assertIn("활용신청", i.followup.send.await_args.args[0])
+        link = i.followup.send.await_args.kwargs["view"].children[0]
+        self.assertIn("map.kakao.com", link.url)
+
+    def test_nearby_not_approved_offers_map(self):
+        self.travel.state.session.get = MagicMock(return_value=_Resp(
+            {"OpenAPI_ServiceResponse": {"cmmMsgHeader": {"returnAuthMsg": "등록되지 않은 서비스키"}}}))
+        from urllib.parse import unquote
+        i = fake_interaction()
+        run(self.travel.send_nearby(i, "도시:강릉", "숙소"))
+        kw = i.followup.send.await_args.kwargs
+        self.assertIn("카카오맵", i.followup.send.await_args.args[0])
+        self.assertEqual(unquote(kw["view"].children[0].url), "https://map.kakao.com/link/search/강릉 숙소")
+        j = fake_interaction()
+        run(self.travel.send_nearby(j, "장소:경포대", "맛집"))  # 이름 검색도 막히면 입력한 이름으로
+        self.assertEqual(unquote(j.followup.send.await_args.kwargs["view"].children[0].url),
+                         "https://map.kakao.com/link/search/경포대 맛집")
 
     def test_unknown_place(self):
         empty = {"response": {"header": {"resultCode": "0000"}, "body": {"items": ""}}}
@@ -421,8 +437,11 @@ class FoodTest(unittest.TestCase):
         self.assertIn("](https://map.kakao.com/link/search/", kw["embed"].description)
         self.assertIn("1km 안", kw["embed"].footer)
         labels = [b.label for b in kw["view"].children]
-        self.assertEqual(labels, ["맛집", "숙소", "관광지", "문화시설", "레포츠"])
+        self.assertEqual(labels, ["맛집", "숙소", "관광지", "문화시설", "레포츠", "카카오맵에서 근처 숙소 더 보기"])
         self.assertTrue(kw["view"].children[1].disabled)
+        from urllib.parse import unquote
+        self.assertEqual(unquote(kw["view"].children[5].url),
+                         "https://map.kakao.com/link/search/가 식당 숙소")
         params = self.travel.state.session.get.call_args.kwargs["params"]
         self.assertEqual((params["contentTypeId"], params["radius"]), ("32", "1000"))
         # 다른 종류 버튼은 다시 장소를 찾지 않고 바로 바꿈

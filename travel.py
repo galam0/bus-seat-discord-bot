@@ -666,6 +666,7 @@ class FoodView(discord.ui.View):
         more = discord.ui.Button(label="근처 맛집 목록", emoji="📋")
         more.callback = self.listing
         self.add_item(more)
+        self.add_item(map_more_button(pt.label, "맛집"))
 
     async def reroll(self, interaction: discord.Interaction):
         await send_food(interaction, self.pt.key, seen=self.seen, edit=True, point=self.pt)
@@ -688,9 +689,11 @@ async def send_food(interaction: discord.Interaction, place: str, seen: set[str]
         pool = await _food_pool(pt)
     except Exception as e:
         log.warning("뭐먹지 실패: %s", str(e)[:150])
+        v = discord.ui.View(timeout=600)
+        v.add_item(map_more_button(point.label if point else _plain(place), "맛집"))
         await interaction.followup.send(
-            f"맛집 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})",
-            ephemeral=True)
+            f"맛집 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})\n"
+            "그동안 카카오맵에서 바로 볼 수 있어요.", view=v, ephemeral=True)
         return
     if not pool:
         await interaction.followup.send(f"{pt.label} 근처에서 맛집 정보를 못 찾았어요.", ephemeral=True)
@@ -711,6 +714,21 @@ async def send_food(interaction: discord.Interaction, place: str, seen: set[str]
 # ---------------------------------------------------------------- 근처
 
 NEAR_KINDS = ["맛집", "숙소", "관광지", "문화시설", "레포츠"]
+MAP_WORD = {"맛집": "맛집", "숙소": "숙소", "관광지": "가볼만한곳", "문화시설": "문화시설", "레포츠": "레저"}
+
+
+def map_more_button(where: str, kind: str) -> discord.ui.Button:
+    """관광공사에 없는 곳까지 카카오맵에서 보기."""
+    return discord.ui.Button(label=f"카카오맵에서 근처 {kind} 더 보기", emoji="🗺️",
+                             url=kakao_link(where, MAP_WORD.get(kind, kind)), row=1)
+
+
+def _plain(place: str) -> str:
+    """'역:강남' -> '강남역', '도시:전주' -> '전주'."""
+    if ":" not in place:
+        return place.strip()
+    kind, name = place.split(":", 1)
+    return f"{name}역" if kind == "역" else name
 RADII = {"500m": 500, "1km": 1000, "2km": 2000, "5km": 5000}
 
 
@@ -719,7 +737,7 @@ def nearby_embed(pt: Spot0, kind: str, spots, radius: int, widened: bool) -> dis
     r = f"{radius // 1000}km" if radius >= 1000 else f"{radius}m"
     e = discord.Embed(title=f"{emoji} {pt.label} 근처 {kind}", color=0x2EB872)
     if not spots:
-        e.description = f"{r} 안에서 찾지 못했어요. 거리를 넓혀 보세요."
+        e.description = f"관광공사에 등록된 곳은 {r} 안에 없어요. 아래 카카오맵 버튼으로 더 찾아보세요."
     lines = []
     area = ""
     for sp in spots:
@@ -736,7 +754,7 @@ def nearby_embed(pt: Spot0, kind: str, spots, radius: int, widened: bool) -> dis
     if img:
         e.set_image(url=img)
     where = {"역": "역", "도시": "도시 중심", "장소": "그 장소"}[pt.kind]
-    e.set_footer(text=f"{where}에서 가까운 순 · {r} 안 · 이름을 누르면 카카오맵 · 한국관광공사")
+    e.set_footer(text=f"{where}에서 가까운 순 · {r} 안 · 이름을 누르면 카카오맵 · 한국관광공사에 등록된 곳만 나와요")
     return e
 
 
@@ -749,6 +767,7 @@ class NearbyView(discord.ui.View):
                                   style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary)
             b.callback = self._cb(pt, kind, radius)
             self.add_item(b)
+        self.add_item(map_more_button(pt.label, current))
 
     @staticmethod
     def _cb(pt, kind, radius):
@@ -765,11 +784,19 @@ async def send_nearby(interaction: discord.Interaction, place: str, kind: str = 
         await interaction.response.send_message("⚠️ 공공데이터포털 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
         return
     await (interaction.response.defer() if edit else interaction.response.defer(thinking=True))
+
+    def map_only():
+        v = discord.ui.View(timeout=600)
+        v.add_item(map_more_button(point.label if point else _plain(place), kind))
+        return v
+
     try:
         pt = point or await resolve_point(place)
         if pt is None:
-            await interaction.followup.send(_NOT_FOUND, ephemeral=True)
+            await interaction.followup.send(_NOT_FOUND + " 카카오맵에서 바로 찾아볼 수도 있어요.", view=map_only(),
+                                            ephemeral=True)
             return
+        point = pt
         r = radius or (3000 if pt.wide else 1000)
         today = datetime.now(KST).date()
         spots = await tour.fetch_spots(state.session, state.kma_key, kind, (pt.lat, pt.lon), None, today,
@@ -782,8 +809,8 @@ async def send_nearby(interaction: discord.Interaction, place: str, kind: str = 
     except Exception as e:
         log.warning("근처 실패: %s", str(e)[:150])
         await interaction.followup.send(
-            f"근처 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})",
-            ephemeral=True)
+            f"관광공사 정보를 받아오지 못했어요. 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})\n"
+            "그동안 카카오맵에서 바로 볼 수 있어요.", view=map_only(), ephemeral=True)
         return
     embed, view = nearby_embed(pt, kind, spots, r, widened), NearbyView(pt, kind, radius)
     if edit:
