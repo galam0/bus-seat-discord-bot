@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from datetime import date, datetime
@@ -38,6 +39,9 @@ class Flow:
         self.provider = provider
         self.dep, self.arr, self.owner_id = dep, arr, owner_id
         self.trips: list = []
+        self.day_label = ""
+        self.sources: list[str] = []
+        self.missing: list[str] = []
 
     def _prompt(self) -> str:
         return f"**{self.dep} → {self.arr}**  날짜를 골라주세요."
@@ -68,15 +72,30 @@ class Flow:
             )
             return
 
+        self.day_label = label
         if self.kind == "bus":  # BusSearch (고속+시외 통합)
             self.trips = drop_departed(result.trips, day)
-            embed = bus_embed(self.dep, self.arr, label, self.trips, result.sources, result.missing)
-            view = ResultView(self.owner_id, self.back, self.trips, self.seat)
+            self.sources, self.missing = result.sources, result.missing
         else:
             self.trips = drop_departed(result, day)
-            embed = train_embed(self.dep, self.arr, label, self.trips, self.provider.label)
-            view = ResultView(self.owner_id, self.back)
+        embed, view = self._render(0)
         await interaction.edit_original_response(content=None, embed=embed, view=view)
+
+    def _render(self, page: int):
+        if self.kind == "bus":
+            view = ResultView(self.owner_id, self.back, trips=self.trips, page=page,
+                              on_page=self.turn, on_seat=self.seat)
+            embed = bus_embed(self.dep, self.arr, self.day_label, self.trips,
+                              self.sources, self.missing, view.page)
+        else:
+            view = ResultView(self.owner_id, self.back, trips=self.trips, page=page, on_page=self.turn)
+            embed = train_embed(self.dep, self.arr, self.day_label, self.trips,
+                                self.provider.label, view.page)
+        return embed, view
+
+    async def turn(self, interaction: discord.Interaction, page: int):
+        embed, view = self._render(page)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def seat(self, interaction: discord.Interaction, idx: int):
         t = self.trips[idx]
@@ -179,17 +198,53 @@ async def mid_cmd(interaction: discord.Interaction, a: str, b: str,
     await interaction.response.send_message(embed=midpoint_embed(origins, cands))
 
 
+async def start_health_server(port: int):
+    """Render 무료 웹 서비스용. 포트를 열어두고 /health 에 응답한다."""
+    from aiohttp import web
+
+    async def health(_request):
+        state = "ready" if client.is_ready() else "starting"
+        return web.json_response({"status": "ok", "bot": state})
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    log.info("헬스체크 서버: 포트 %s", port)
+    return runner
+
+
+async def amain():
+    port = os.getenv("PORT")  # Render 가 넣어줌. 로컬에선 보통 비어 있음
+    runner = await start_health_server(int(port)) if port else None
+    token = os.getenv("DISCORD_TOKEN")
+    try:
+        if not token:
+            msg = "DISCORD_TOKEN 이 비어 있어요. .env 또는 Render 환경변수를 확인하세요."
+            if runner is None:
+                raise SystemExit(msg)
+            log.error("%s 토큰을 넣으면 자동으로 다시 시작돼요.", msg)
+            await asyncio.Event().wait()  # 서버는 살려둔다
+        client.bus = get_bus_provider(os.getenv("BUS_PROVIDER", "mock"))
+        client.train = get_train_provider(os.getenv("TRAIN_PROVIDER", "mock"))
+        async with client:
+            await client.start(token)
+    finally:
+        if runner is not None:
+            await runner.cleanup()
+
+
 def main():
     from dotenv import load_dotenv
 
     load_dotenv()
-    logging.basicConfig(level=logging.INFO)
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise SystemExit("DISCORD_TOKEN 이 비어 있어요. .env 를 확인하세요.")
-    client.bus = get_bus_provider(os.getenv("BUS_PROVIDER", "mock"))
-    client.train = get_train_provider(os.getenv("TRAIN_PROVIDER", "mock"))
-    client.run(token, log_handler=None)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        asyncio.run(amain())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

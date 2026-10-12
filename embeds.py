@@ -3,8 +3,24 @@ import discord
 from midpoint import Candidate, fmt_minutes
 from models import BusTrip, TrainTrip
 
-MAX_ROWS = 25  # 디스코드 선택 메뉴 한도와 맞춤
+PAGE_SIZE = 15  # 한 화면에 보여줄 편 수 (자리 보기 메뉴 25개 한도보다 작게)
 MEDALS = ("🥇", "🥈", "🥉")
+
+
+def page_count(n: int, size: int = PAGE_SIZE) -> int:
+    return max(1, -(-n // size))
+
+
+def page_range(n: int, page: int, size: int = PAGE_SIZE) -> tuple[int, int]:
+    """page 번째 쪽의 [start, end) 인덱스. 범위를 벗어난 page 는 끝으로 맞춘다."""
+    page = min(max(page, 0), page_count(n, size) - 1)
+    start = page * size
+    return start, min(start + size, n)
+
+
+def _page_text(n: int, page: int) -> str:
+    pages = page_count(n)
+    return f"  ·  {page + 1}/{pages}쪽" if pages > 1 else ""
 
 
 def _bus_seat_text(t: BusTrip) -> str:
@@ -15,18 +31,17 @@ def _bus_seat_text(t: BusTrip) -> str:
 
 
 def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
-              sources: list[str], missing: list[str] | None = None) -> discord.Embed:
+              sources: list[str], missing: list[str] | None = None, page: int = 0) -> discord.Embed:
+    start, end = page_range(len(trips), page)
     lines = [
         f"`{t.depart}→{t.arrive}` [{t.kind}] {t.grade} · {_bus_seat_text(t)} · {t.fare:,}원"
-        for t in trips[:MAX_ROWS]
+        for t in trips[start:end]
     ]
-    if len(trips) > MAX_ROWS:
-        lines.append(f"…외 {len(trips) - MAX_ROWS}편")
     body = "\n".join(lines) if lines else "남은 편이 없어요."
     counts = " · ".join(
         f"{k} {n}편" for k in ("고속", "시외") if (n := sum(t.kind == k for t in trips))
     )
-    head = f"**{day_label}**" + (f"  ({counts})" if counts else "")
+    head = f"**{day_label}**" + (f"  ({counts})" if counts else "") + _page_text(len(trips), page)
     if missing:
         head += f"\n⚠️ {', '.join(missing)} 조회 실패 — 일부 노선이 빠졌을 수 있어요"
     e = discord.Embed(title=f"🚌 {dep} → {arr}", description=f"{head}\n{body}")
@@ -34,15 +49,16 @@ def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
     return e
 
 
-def train_embed(dep: str, arr: str, day_label: str, trips: list[TrainTrip], source: str) -> discord.Embed:
+def train_embed(dep: str, arr: str, day_label: str, trips: list[TrainTrip],
+                source: str, page: int = 0) -> discord.Embed:
+    start, end = page_range(len(trips), page)
     lines = [
         f"`{t.depart}→{t.arrive}` {t.name} · 일반 {t.general} · 특실 {t.special}"
-        for t in trips[:MAX_ROWS]
+        for t in trips[start:end]
     ]
-    if len(trips) > MAX_ROWS:
-        lines.append(f"…외 {len(trips) - MAX_ROWS}편")
     body = "\n".join(lines) if lines else "남은 편이 없어요."
-    e = discord.Embed(title=f"🚆 {dep} → {arr}", description=f"**{day_label}**\n{body}")
+    head = f"**{day_label}**  ({len(trips)}편)" + _page_text(len(trips), page)
+    e = discord.Embed(title=f"🚆 {dep} → {arr}", description=f"{head}\n{body}")
     e.set_footer(text=f"출처: {source} · 기차는 잔여 석수 없이 상태만 보여요")
     return e
 

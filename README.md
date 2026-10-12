@@ -14,6 +14,13 @@ python bot.py
 ```
 테스트: `python -m unittest -v` (discord.py가 있어야 전부 돌아가요)
 
+결과는 15편씩 보여주고 `◀ 이전` `다음 ▶`로 넘겨요. 오늘 날짜는 이미 출발한 편을 빼고 보여줘요.
+
+## Render 배포 (무료 웹 서비스)
+- Build: `pip install -r requirements.txt` / Start: `python bot.py` / Health check: `/health`
+- 환경변수 `DISCORD_TOKEN` 을 넣으면 자동으로 다시 시작돼요. 토큰이 없어도 서버는 떠 있고 로그에 안내가 나와요.
+- 무료 플랜은 15분 동안 접속이 없으면 잠들어요. UptimeRobot 같은 곳에서 `/health` 를 5분마다 호출하면 깨어 있어요.
+
 ## 현재 상태
 - `BUS_PROVIDER=mock`, `TRAIN_PROVIDER=mock` : 테스트 데이터로 전체 흐름 동작 (실제 좌석 아님)
 - `BUS_PROVIDER=real` 은 아래 세 곳을 동시에 조회해서 시간순으로 합쳐요. 아직 셋 다 연동 전이에요.

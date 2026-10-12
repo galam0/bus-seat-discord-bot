@@ -13,7 +13,7 @@ except ModuleNotFoundError:
 if HAS_DISCORD:
     import bot
     from bot import Flow, KST, drop_departed
-    from embeds import MAX_ROWS, bus_embed, midpoint_embed
+    from embeds import PAGE_SIZE, bus_embed, midpoint_embed, page_count, page_range, train_embed
     from views import DateView, ResultView, date_label
 
 from midpoint import find_midpoints, fmt_minutes
@@ -174,26 +174,75 @@ class ViewTest(unittest.TestCase):
 
         run(go())
 
-    def test_result_view_has_select_and_back(self):
-        trips = run(MockBusProvider().search("서울", "대전", TODAY)).trips
+    def test_result_view_first_page(self):
+        trips = run(MockBusProvider().search("서울", "강릉", TODAY)).trips
+        self.assertGreater(len(trips), PAGE_SIZE * 2)
 
         async def go():
-            v = ResultView(1, AsyncMock(), trips, AsyncMock())
-            self.assertEqual(len(v.children), 2)
-            self.assertEqual(len(v.children[0].options), min(25, len(trips)))
-            self.assertIn("[", v.children[0].options[0].label)
+            v = ResultView(1, AsyncMock(), trips=trips, page=0, on_page=AsyncMock(), on_seat=AsyncMock())
+            select, prev, nxt, back = v.children
+            self.assertEqual([o.value for o in select.options], [str(i) for i in range(PAGE_SIZE)])
+            self.assertIn("[", select.options[0].label)
+            self.assertTrue(prev.disabled)
+            self.assertFalse(nxt.disabled)
+            self.assertEqual(back.label, "다른 날짜")
+
+        run(go())
+
+    def test_result_view_last_page_and_clamp(self):
+        trips = run(MockBusProvider().search("서울", "강릉", TODAY)).trips
+        last = page_count(len(trips)) - 1
+
+        async def go():
+            v = ResultView(1, AsyncMock(), trips=trips, page=99, on_page=AsyncMock(), on_seat=AsyncMock())
+            self.assertEqual(v.page, last)
+            select, prev, nxt, _ = v.children
+            self.assertEqual(select.options[-1].value, str(len(trips) - 1))
+            self.assertFalse(prev.disabled)
+            self.assertTrue(nxt.disabled)
+
+        run(go())
+
+    def test_single_page_has_no_paging_buttons(self):
+        trips = [BusTrip("07:00", "09:00", "우등", 20000, 28, (1,))] * 3
+
+        async def go():
+            v = ResultView(1, AsyncMock(), trips=trips, on_page=AsyncMock(), on_seat=AsyncMock())
+            self.assertEqual(len(v.children), 2)  # 메뉴 + 다른 날짜
+
+        run(go())
+
+    def test_empty_result_only_back(self):
+        async def go():
+            v = ResultView(1, AsyncMock(), trips=[], on_page=AsyncMock(), on_seat=AsyncMock())
+            self.assertEqual(len(v.children), 1)
 
         run(go())
 
 
 @needs_discord
 class EmbedTest(unittest.TestCase):
-    def test_sold_out_and_cap(self):
-        trips = [BusTrip("07:00", "09:00", "우등", 20000, 28, ())] * (MAX_ROWS + 3)
-        e = bus_embed("서울", "대전", "오늘", trips, ["테스트"])
-        self.assertIn("매진", e.description)
-        self.assertIn("외 3편", e.description)
-        self.assertLess(len(e.description), 4096)
+    def test_pages_show_all_trips(self):
+        trips = [BusTrip(f"{h:02d}:00", "23:59", "우등", 20000, 28, ()) for h in range(6, 6 + PAGE_SIZE + 3)]
+        e0 = bus_embed("서울", "대전", "오늘", trips, ["테스트"], page=0)
+        e1 = bus_embed("서울", "대전", "오늘", trips, ["테스트"], page=1)
+        self.assertIn("1/2쪽", e0.description)
+        self.assertIn("2/2쪽", e1.description)
+        self.assertIn("매진", e0.description)
+        shown = [l for e in (e0, e1) for l in e.description.split("\n") if l.startswith("`")]
+        self.assertEqual(len(shown), len(trips))
+        self.assertLess(len(e0.description), 4096)
+
+    def test_page_range(self):
+        self.assertEqual(page_range(0, 0), (0, 0))
+        self.assertEqual(page_count(0), 1)
+        self.assertEqual(page_range(PAGE_SIZE + 1, 1), (PAGE_SIZE, PAGE_SIZE + 1))
+        self.assertEqual(page_range(PAGE_SIZE + 1, -5), (0, PAGE_SIZE))
+
+    def test_train_embed_pages(self):
+        trips = run(MockTrainProvider().search("서울", "부산", TODAY))
+        e = train_embed("서울", "부산", "오늘", trips, "테스트", page=1)
+        self.assertIn(f"2/{page_count(len(trips))}쪽", e.description)
 
     def test_kind_tags_and_missing(self):
         trips = [BusTrip("07:00", "09:00", "우등", 20000, 28, (1,), "고속"),
@@ -250,13 +299,31 @@ class FlowTest(unittest.TestCase):
 
         run(go())
 
+    def test_turn_page_then_seat_on_second_page(self):
+        async def go():
+            flow = Flow("bus", MockBusProvider(), "서울", "강릉", 1)
+            await flow.pick(fake_interaction(), date(2026, 10, 20))
+            t = fake_interaction()
+            await flow.turn(t, 1)
+            kwargs = t.response.edit_message.await_args.kwargs
+            self.assertIn("2/", kwargs["embed"].description)
+            select = kwargs["view"].children[0]
+            idx = int(select.options[0].value)
+            self.assertEqual(idx, PAGE_SIZE)
+            s = fake_interaction()
+            await flow.seat(s, idx)
+            self.assertIn(flow.trips[idx].depart, s.response.send_message.await_args.args[0])
+
+        run(go())
+
     def test_train_flow_has_no_select(self):
         async def go():
             flow = Flow("train", MockTrainProvider(), "서울", "부산", 1)
             i = fake_interaction()
             await flow.pick(i, date(2026, 10, 20))
             view = i.edit_original_response.await_args.kwargs["view"]
-            self.assertEqual(len(view.children), 1)
+            labels = [c.label for c in view.children]
+            self.assertEqual(labels, ["이전", "다음", "다른 날짜"])
 
         run(go())
 

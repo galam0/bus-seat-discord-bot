@@ -2,6 +2,8 @@ from datetime import date, timedelta
 
 import discord
 
+from embeds import page_count, page_range
+
 WEEK = "월화수목금토일"
 _PREFIX = {0: "오늘", 1: "내일", 2: "모레"}
 
@@ -28,18 +30,25 @@ class _OwnerOnly(discord.ui.View):
         return True
 
 
+def _button(label, callback, *, emoji=None, disabled=False, row=None, primary=False):
+    btn = discord.ui.Button(
+        label=label,
+        emoji=emoji,
+        disabled=disabled,
+        row=row,
+        style=discord.ButtonStyle.primary if primary else discord.ButtonStyle.secondary,
+    )
+    btn.callback = callback
+    return btn
+
+
 class DateView(_OwnerOnly):
     """날짜 버튼 (오늘부터 7일)."""
 
     def __init__(self, owner_id: int, on_pick, today: date, timeout: float = 180):
         super().__init__(owner_id, timeout)
         for d in date_options(today):
-            btn = discord.ui.Button(
-                label=date_label(d, today),
-                style=discord.ButtonStyle.primary if d == today else discord.ButtonStyle.secondary,
-            )
-            btn.callback = self._make_callback(on_pick, d)
-            self.add_item(btn)
+            self.add_item(_button(date_label(d, today), self._make_callback(on_pick, d), primary=d == today))
 
     @staticmethod
     def _make_callback(on_pick, d: date):
@@ -50,20 +59,31 @@ class DateView(_OwnerOnly):
 
 
 class ResultView(_OwnerOnly):
-    """결과 화면: (버스면) 자리 보기 선택 메뉴 + 다른 날짜 버튼."""
+    """결과 화면.
 
-    def __init__(self, owner_id: int, on_back, trips=None, on_seat=None, timeout: float = 300):
+    1줄: (버스면) 자리 보기 선택 메뉴 — 지금 쪽에 보이는 편만
+    2줄: ◀ 이전 / 다음 ▶ (쪽이 2개 이상일 때) / 📅 다른 날짜
+    """
+
+    def __init__(self, owner_id: int, on_back, *, trips=(), page: int = 0,
+                 on_page=None, on_seat=None, timeout: float = 300):
         super().__init__(owner_id, timeout)
-        if trips and on_seat:
+        n = len(trips)
+        pages = page_count(n)
+        page = min(max(page, 0), pages - 1)
+        self.page = page
+        start, end = page_range(n, page)
+
+        if on_seat and n:
             options = [
                 discord.SelectOption(
                     label=f"{t.depart} [{t.kind}] {t.grade}",
                     description="매진" if t.sold_out else f"잔여 {t.seats_left}석",
-                    value=str(i),
+                    value=str(i),  # 전체 목록 기준 번호
                 )
-                for i, t in enumerate(trips[:25])
+                for i, t in enumerate(trips[start:end], start=start)
             ]
-            select = discord.ui.Select(placeholder="🪑 자리 보기 — 시간을 골라요", options=options)
+            select = discord.ui.Select(placeholder="🪑 자리 보기 — 시간을 골라요", options=options, row=0)
 
             async def select_cb(interaction: discord.Interaction):
                 await on_seat(interaction, int(select.values[0]))
@@ -71,10 +91,17 @@ class ResultView(_OwnerOnly):
             select.callback = select_cb
             self.add_item(select)
 
-        back = discord.ui.Button(label="다른 날짜", emoji="📅", style=discord.ButtonStyle.secondary)
+        if on_page and pages > 1:
+            async def prev_cb(interaction: discord.Interaction):
+                await on_page(interaction, page - 1)
+
+            async def next_cb(interaction: discord.Interaction):
+                await on_page(interaction, page + 1)
+
+            self.add_item(_button("이전", prev_cb, emoji="◀", disabled=page == 0, row=1))
+            self.add_item(_button("다음", next_cb, emoji="▶", disabled=page >= pages - 1, row=1))
 
         async def back_cb(interaction: discord.Interaction):
             await on_back(interaction)
 
-        back.callback = back_cb
-        self.add_item(back)
+        self.add_item(_button("다른 날짜", back_cb, emoji="📅", row=1))
