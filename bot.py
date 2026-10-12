@@ -174,6 +174,7 @@ class SeatBot(discord.Client):
 
     async def setup_hook(self):
         await travel.state.start()  # 지하철 데이터는 뒤에서 불러온다
+        self.loop.create_task(travel.trips_ui.reminder_loop(self))
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
             guild = discord.Object(int(guild_id))
@@ -181,6 +182,14 @@ class SeatBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        # 여행 카드 버튼은 봇이 다시 켜져도 동작하도록 custom_id 로 직접 처리
+        if interaction.type == discord.InteractionType.component:
+            try:
+                await travel.trips_ui.handle_component(interaction)
+            except Exception:
+                log.exception("여행 버튼 처리 실패")
 
     async def on_ready(self):
         log.info("로그인: %s", self.user)
@@ -274,7 +283,7 @@ async def mid_cmd(interaction: discord.Interaction, a: str, b: str,
     await interaction.response.send_message(embed=midpoint_embed(origins, cands), view=view)
 
 
-travel.register(tree)
+travel.register(tree, start_bus=lambda i, dep, arr: _start(i, "bus", dep, arr))
 
 
 async def start_health_server(port: int):
@@ -298,9 +307,6 @@ async def start_health_server(port: int):
 async def amain():
     port = os.getenv("PORT")  # Render 가 넣어줌. 로컬에선 보통 비어 있음
     runner = await start_health_server(int(port)) if port else None
-    if port and os.getenv("PROBE", "1") == "1":  # (임시) 새 API 응답 형식 확인
-        from probe import run_probe
-        asyncio.get_running_loop().create_task(run_probe())
     token = os.getenv("DISCORD_TOKEN")
     try:
         if not token:

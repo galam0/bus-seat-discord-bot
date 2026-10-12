@@ -9,10 +9,15 @@ from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 
-from cities import CITIES
+from cities import CITIES, PLACES, sido_of
 from subway import (REALTIME, REALTIME_ALIAS, SubwayData, find_route, line_color, line_sort_key,
                     parse_arrivals, realtime_code)
 from weather import fetch_forecast, pick_slots
+import timetable
+import tour
+import trips_ui
+from dust import fetch_dust
+from trips import MemoryStore, NeonStore, TripBook
 
 log = logging.getLogger("seatbot.travel")
 KST = ZoneInfo("Asia/Seoul")
@@ -75,6 +80,21 @@ class TravelState:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         self._loading = asyncio.create_task(self.subway.load(self.session))
         asyncio.create_task(self.self_check())
+        await self.load_trips()
+
+    async def load_trips(self):
+        url = os.getenv("TRAVEL_DATABASE_URL")
+        if url:
+            try:
+                book = TripBook(NeonStore(url, self.session))
+                await book.load()
+                trips_ui.book = book
+                log.info("여행 저장소: DB 연결됨, 여행 %d개", len(book.trips))
+                return
+            except Exception as e:
+                log.warning("여행 저장소: DB 연결 실패, 임시 저장으로 (%s)", str(e)[:200])
+        trips_ui.book = TripBook(MemoryStore())
+        await trips_ui.book.load()
 
     async def self_check(self):
         """시작할 때 실시간 도착·날씨 키가 되는지 한 번 확인해서 로그에 남긴다 (키 값은 남기지 않음)."""
@@ -102,6 +122,16 @@ class TravelState:
                 if r:
                     log.info("확인 경로 %s->%s (%d분): %s", a, b, round(r.minutes),
                              " | ".join(f"{l.line} {l.stations[0]}->{l.stations[-1]} [{l.heading}]" for l in r.legs))
+        try:
+            wk = timetable.week_tag(datetime.now(KST).date())
+            for inout in (1, 2):
+                rows = await _timetable("0222", wk, inout)
+                info = timetable.summarize(rows, timetable.direction_label("2호선", inout))
+                if info.count:
+                    log.info("확인 막차 강남 %s: 첫차 %s %s행 / 막차 %s", info.label, info.first.time, info.first.dest,
+                             ", ".join(f"{d.time} {d.dest}행" for d in info.lasts))
+        except Exception as e:
+            log.warning("확인 막차 실패: %s", str(e)[:200])
         if self.realtime_keys:
             data = await fetch_realtime("강남")
             if data:
@@ -158,7 +188,7 @@ async def line_autocomplete(interaction: discord.Interaction, current: str):
 
 
 async def city_autocomplete(interaction: discord.Interaction, current: str):
-    return [app_commands.Choice(name=n, value=n) for n in match_names(list(CITIES), current)]
+    return [app_commands.Choice(name=n, value=n) for n in match_names(list(PLACES), current)]
 
 
 # ---------------------------------------------------------------- 지하철
@@ -323,7 +353,7 @@ async def send_arrivals(interaction: discord.Interaction, station: str, ephemera
 # ---------------------------------------------------------------- 날씨
 
 async def send_weather(interaction: discord.Interaction, city: str):
-    if city not in CITIES:
+    if city not in PLACES:
         await interaction.response.send_message("자동완성 목록에서 도시를 골라주세요.", ephemeral=True)
         return
     if not state.kma_key:
@@ -331,7 +361,10 @@ async def send_weather(interaction: discord.Interaction, city: str):
         return
     await interaction.response.defer(thinking=True)
     now = datetime.now(KST)
-    lat, lon = CITIES[city]
+    lat, lon = PLACES[city]
+    sido = sido_of(city)
+    dust_task = (asyncio.create_task(fetch_dust(state.session, state.kma_key, sido[0], city))
+                 if sido else None)
     try:
         fc = await fetch_forecast(state.session, state.kma_key, lat, lon, now)
     except Exception as e:
@@ -359,7 +392,159 @@ async def send_weather(interaction: discord.Interaction, city: str):
         lo_t = f"{lo:.0f}°" if lo is not None else "-"
         hi_t = f"{hi:.0f}°" if hi is not None else "-"
         embed.add_field(name=label, value=f"최저 {lo_t} / 최고 {hi_t}", inline=True)
-    embed.set_footer(text="기상청 단기예보 · 도시 중심 기준")
+    if dust_task:
+        try:
+            dust = await dust_task
+            embed.add_field(name=f"공기 · {dust.area}", value=dust.text(), inline=False)
+        except Exception as e:
+            log.warning("미세먼지 실패: %s", str(e)[:150])
+            embed.add_field(name="공기", value="미세먼지 정보를 못 받았어요 (에어코리아 활용신청을 확인해 주세요)",
+                            inline=False)
+    embed.set_footer(text="기상청 단기예보 · 에어코리아 · 도시 중심 기준")
+    await interaction.followup.send(embed=embed)
+
+
+# ---------------------------------------------------------------- 관광
+
+class TourView(discord.ui.View):
+    """종류 바꾸기 버튼."""
+
+    def __init__(self, city: str, current: str, owner: int):
+        super().__init__(timeout=600)
+        self.owner = owner
+        for kind in tour.KINDS:
+            btn = discord.ui.Button(label=kind, emoji=tour.KIND_EMOJI[kind], disabled=kind == current,
+                                    style=discord.ButtonStyle.primary if kind == current
+                                    else discord.ButtonStyle.secondary, row=0 if len(self.children) < 5 else 1)
+            btn.callback = self._cb(city, kind)
+            self.add_item(btn)
+
+    @staticmethod
+    def _cb(city, kind):
+        async def cb(interaction: discord.Interaction):
+            await send_tour(interaction, city, kind, edit=True)
+
+        return cb
+
+
+def tour_embed(city: str, kind: str, spots) -> discord.Embed:
+    emoji = tour.KIND_EMOJI[kind]
+    embed = discord.Embed(title=f"{emoji} {city} {kind}", color=0x2EB872)
+    if not spots:
+        embed.description = "가까운 곳에서 찾지 못했어요."
+    lines = []
+    for sp in spots:
+        extra = []
+        if sp.period():
+            extra.append(f"📅 {sp.period()}")
+        if sp.km is not None:
+            extra.append(f"{sp.km:.1f}km")
+        addr = sp.addr.split(" ")
+        short = " ".join(addr[:3]) if addr else ""
+        lines.append(f"**{sp.title}**\n└ {short}" + (f" · {' · '.join(extra)}" if extra else ""))
+    if lines:
+        embed.description = "\n".join(lines)[:4000]
+    img = next((sp.image for sp in spots if sp.image), "")
+    if img:
+        embed.set_image(url=img)
+    embed.set_footer(text="한국관광공사 관광정보 · 도시 중심에서 가까운 순" if kind != "축제"
+                     else "한국관광공사 관광정보 · 진행 중이거나 열릴 축제 (도시 30km 안)")
+    return embed
+
+
+async def send_tour(interaction: discord.Interaction, city: str, kind: str = "관광지", edit: bool = False):
+    if city not in PLACES:
+        await interaction.response.send_message("자동완성 목록에서 도시를 골라주세요.", ephemeral=True)
+        return
+    if kind not in tour.KINDS:
+        kind = "관광지"
+    if not state.kma_key:
+        await interaction.response.send_message("⚠️ 공공데이터포털 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    if edit:
+        await interaction.response.defer()
+    else:
+        await interaction.response.defer(thinking=True)
+    sido = sido_of(city)
+    try:
+        spots = await tour.fetch_spots(state.session, state.kma_key, kind, PLACES[city],
+                                       sido[1] if sido else None, datetime.now(KST).date())
+    except Exception as e:
+        log.warning("관광 실패: %s", str(e)[:150])
+        await interaction.followup.send(
+            f"관광 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})",
+            ephemeral=True)
+        return
+    embed, view = tour_embed(city, kind, spots), TourView(city, kind, interaction.user.id)
+    if edit:
+        await interaction.edit_original_response(embed=embed, view=view)
+    else:
+        await interaction.followup.send(embed=embed, view=view)
+
+
+# ---------------------------------------------------------------- 첫차·막차
+
+_tt_cache: dict[tuple, list] = {}
+
+
+async def _timetable(cd: str, week: int, inout: int) -> list[dict]:
+    key = (cd, week, inout, datetime.now(KST).date())
+    if key not in _tt_cache:
+        if len(_tt_cache) > 300:
+            _tt_cache.clear()
+        last = None
+        for k in list(state.subway.keys):
+            try:
+                _tt_cache[key] = await timetable.fetch_direction(state.session, k, cd, week, inout)
+                break
+            except Exception as e:
+                last = e
+        else:
+            raise RuntimeError(str(last))
+    return _tt_cache[key]
+
+
+async def send_last_train(interaction: discord.Interaction, station: str, day: str = "오늘"):
+    msg = await state.ensure_subway()
+    if msg:
+        await interaction.response.send_message(f"⚠️ {msg}", ephemeral=True)
+        return
+    net = state.subway.net
+    ids = net.by_name.get(station)
+    if not ids:
+        await interaction.response.send_message("모르는 역이에요. 자동완성 목록에서 골라주세요.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    today = datetime.now(KST).date()
+    week = {"평일": 1, "토요일": 2, "휴일": 3}.get(day) or timetable.week_tag(today)
+    embed = discord.Embed(title=f"🌙 {station}역 첫차·막차",
+                          description=f"**{timetable.WEEK_NAME[week]}** 시간표 · 공휴일은 휴일 시간표를 따라요",
+                          color=0x6C5CE7)
+    found = False
+    for nid in sorted(ids, key=lambda i: line_sort_key(net.nodes[i].line))[:6]:
+        node = net.nodes[nid]
+        rows_text = []
+        for inout in (1, 2):
+            try:
+                rows = await _timetable(nid, week, inout)
+            except Exception as e:
+                log.warning("시간표 실패 %s: %s", nid, str(e)[:120])
+                rows = []
+            info = timetable.summarize(rows, timetable.direction_label(node.line, inout))
+            if not info.count:
+                continue
+            found = True
+            dests = "·".join(info.main_dests)
+            last = info.lasts[0]
+            more = ", ".join(f"{d.time} {d.dest}행" for d in info.lasts[1:])
+            rows_text.append(f"**{info.label}** ({dests}행 쪽)\n"
+                             f"첫차 `{info.first.time}` {info.first.dest}행 · 막차 `{last.time}` **{last.dest}행**"
+                             + (f"\n└ 그 전: {more}" if more else ""))
+        if rows_text:
+            embed.add_field(name=node.line, value="\n".join(rows_text)[:1024], inline=False)
+    if not found:
+        embed.description += "\n\n시간표 정보가 없어요. 서울시 데이터에 없는 노선(일부 코레일·경전철 구간)일 수 있어요."
+    embed.set_footer(text="서울시 지하철 역별 시간표 · 막차는 행선지가 짧을 수 있으니 '행'을 꼭 확인하세요")
     await interaction.followup.send(embed=embed)
 
 
@@ -387,7 +572,27 @@ class MidpointBusView(discord.ui.View):
 
 # ---------------------------------------------------------------- 등록
 
-def register(tree: app_commands.CommandTree):
+async def tour_kind_autocomplete(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=k, value=k) for k in tour.KINDS if current.strip() in k]
+
+
+def register(tree: app_commands.CommandTree, start_bus=None):
+    trips_ui.register(tree, start_bus=start_bus, send_weather=send_weather, send_tour=send_tour)
+
+    @tree.command(name="관광", description="도시의 관광지·맛집·축제·숙소를 보여줘요 (한국관광공사)")
+    @app_commands.rename(city="도시", kind="종류")
+    @app_commands.autocomplete(city=city_autocomplete, kind=tour_kind_autocomplete)
+    async def tour_cmd(interaction: discord.Interaction, city: str, kind: str | None = None):
+        await send_tour(interaction, city, kind or "관광지")
+
+    @tree.command(name="막차", description="지하철역 첫차·막차 시간을 알려줘요")
+    @app_commands.rename(station="역", day="요일")
+    @app_commands.describe(day="비우면 오늘 기준")
+    @app_commands.choices(day=[app_commands.Choice(name=n, value=n) for n in ("평일", "토요일", "휴일")])
+    @app_commands.autocomplete(station=station_autocomplete)
+    async def last_cmd(interaction: discord.Interaction, station: str, day: str | None = None):
+        await send_last_train(interaction, station, day or "오늘")
+
     @tree.command(name="지하철", description="수도권 지하철 경로와 환승을 알려줘요")
     @app_commands.rename(src="출발역", dst="도착역")
     @app_commands.autocomplete(src=station_autocomplete, dst=station_autocomplete)
