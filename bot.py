@@ -292,6 +292,9 @@ async def start_health_server(port: int):
 async def amain():
     port = os.getenv("PORT")  # Render 가 넣어줌. 로컬에선 보통 비어 있음
     runner = await start_health_server(int(port)) if port else None
+    if port:  # (임시) Render 에서만 공개 API 응답 형식 확인
+        from probe import run_probe
+        asyncio.get_running_loop().create_task(run_probe())
     token = os.getenv("DISCORD_TOKEN")
     try:
         if not token:
