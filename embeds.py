@@ -34,7 +34,8 @@ def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
               sources: list[str], missing: list[str] | None = None, page: int = 0) -> discord.Embed:
     start, end = page_range(len(trips), page)
     lines = [
-        f"`{t.depart}→{t.arrive}` [{t.kind}] {t.grade} · {_bus_seat_text(t)} · {t.fare:,}원"
+        f"`{t.depart}→{t.arrive}` " + (f"**{t.route}** " if t.route else "")
+        + f"[{t.kind}] {t.grade} · {_bus_seat_text(t)} · {t.fare:,}원"
         for t in trips[start:end]
     ]
     body = "\n".join(lines) if lines else "남은 편이 없어요."
@@ -45,7 +46,7 @@ def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
     if missing:
         head += f"\n⚠️ {', '.join(missing)} 조회 실패 — 일부 노선이 빠졌을 수 있어요"
     e = discord.Embed(title=f"🚌 {dep} → {arr}", description=f"{head}\n{body}")
-    e.set_footer(text=f"출처: {' + '.join(sources)}")
+    e.set_footer(text=f"출처: {' + '.join(sources)} · 터미널 하나만 보려면 출발/도착에 터미널 이름을 넣어보세요 (예: 동서울)")
     return e
 
 

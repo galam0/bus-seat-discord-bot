@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 
-from cities import CITIES
+from cities import CITIES, place_label, resolve_place
 from embeds import bus_embed, midpoint_embed, train_embed
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
@@ -31,6 +31,14 @@ def drop_departed(trips, day: date, now: datetime | None = None):
     return [t for t in trips if t.depart >= hhmm]
 
 
+def filter_terminals(trips, dep_term: str | None, arr_term: str | None):
+    """터미널을 지정했으면 그 터미널에서 출발/도착하는 편만 남긴다."""
+    return [
+        t for t in trips
+        if (not dep_term or t.dep_terminal == dep_term) and (not arr_term or t.arr_terminal == arr_term)
+    ]
+
+
 class Flow:
     """한 번의 조회 흐름: 날짜 고르기 -> 결과 -> (다른 날짜 | 자리 보기)."""
 
@@ -38,6 +46,15 @@ class Flow:
         self.kind = kind  # "bus" | "train"
         self.provider = provider
         self.dep, self.arr, self.owner_id = dep, arr, owner_id
+        # 버스는 '동서울' 같은 터미널 이름도 받는다: 도시로 조회한 뒤 그 터미널만 남긴다
+        self.q_dep, self.q_arr = dep, arr
+        self.dep_term = self.arr_term = None
+        if kind == "bus":
+            try:
+                self.q_dep, self.dep_term = resolve_place(dep)
+                self.q_arr, self.arr_term = resolve_place(arr)
+            except KeyError:
+                pass  # 실제 공급자가 아는 이름일 수 있으니 그대로 넘긴다
         self.trips: list = []
         self.day_label = ""
         self.sources: list[str] = []
@@ -61,7 +78,7 @@ class Flow:
             content=f"**{self.dep} → {self.arr}** {label} 조회 중…", embed=None, view=None
         )
         try:
-            result = await self.provider.search(self.dep, self.arr, day)
+            result = await self.provider.search(self.q_dep, self.q_arr, day)
         except ProviderUnavailable as e:
             await interaction.edit_original_response(content=f"⚠️ {e}", view=self._date_view())
             return
@@ -74,7 +91,7 @@ class Flow:
 
         self.day_label = label
         if self.kind == "bus":  # BusSearch (고속+시외 통합)
-            self.trips = drop_departed(result.trips, day)
+            self.trips = drop_departed(filter_terminals(result.trips, self.dep_term, self.arr_term), day)
             self.sources, self.missing = result.sources, result.missing
         else:
             self.trips = drop_departed(result, day)
@@ -99,7 +116,8 @@ class Flow:
 
     async def seat(self, interaction: discord.Interaction, idx: int):
         t = self.trips[idx]
-        head = f"**{self.dep} → {self.arr}  {t.depart} [{t.kind}] {t.grade}**"
+        route = t.route or f"{self.dep} → {self.arr}"
+        head = f"**{t.depart}→{t.arrive}  {route}**  [{t.kind}] {t.grade}"
         if t.sold_out:
             text = f"{head}\n🔴 매진이에요."
         else:
@@ -138,7 +156,13 @@ def _terminal_autocomplete(attr: str):
         except Exception:
             return []
         cur = current.strip()
-        return [app_commands.Choice(name=n, value=n) for n in names if cur in n][:25]
+        label = place_label if attr == "bus" else str
+        choices = []
+        for n in names:
+            text = label(n)
+            if cur in text:
+                choices.append(app_commands.Choice(name=text, value=n))
+        return choices[:25]
 
     return autocomplete
 
@@ -146,6 +170,13 @@ def _terminal_autocomplete(attr: str):
 async def city_autocomplete(interaction: discord.Interaction, current: str):
     cur = current.strip()
     return [app_commands.Choice(name=n, value=n) for n in CITIES if cur in n][:25]
+
+
+def same_city(a: str, b: str) -> bool:
+    try:
+        return resolve_place(a)[0] == resolve_place(b)[0]
+    except KeyError:
+        return False
 
 
 async def _start(interaction: discord.Interaction, kind: str, dep: str, arr: str):
@@ -160,6 +191,9 @@ async def _start(interaction: discord.Interaction, kind: str, dep: str, arr: str
         return
     if dep not in names or arr not in names:
         await interaction.response.send_message("목록에 있는 이름을 골라주세요. (입력하면 자동완성이 떠요)", ephemeral=True)
+        return
+    if kind == "bus" and same_city(dep, arr):
+        await interaction.response.send_message("출발과 도착이 같은 도시예요.", ephemeral=True)
         return
     await Flow(kind, provider, dep, arr, interaction.user.id).start(interaction)
 

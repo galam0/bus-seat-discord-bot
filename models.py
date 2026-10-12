@@ -10,6 +10,14 @@ class BusTrip:
     seats_total: int
     free_seats: tuple[int, ...]  # 비어 있는 좌석 번호
     kind: str = "고속"  # 고속 / 시외
+    dep_terminal: str = ""  # 출발 터미널 (예: 진주고속)
+    arr_terminal: str = ""  # 도착 터미널 (예: 서울경부)
+
+    @property
+    def route(self) -> str:
+        if self.dep_terminal and self.arr_terminal:
+            return f"{self.dep_terminal} → {self.arr_terminal}"
+        return ""
 
     @property
     def seats_left(self) -> int:

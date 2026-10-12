@@ -42,6 +42,58 @@ CITIES: dict[str, tuple[float, float]] = {
     "거제": (34.8806, 128.6211),
 }
 
+# 버스 터미널: 도시 -> [(터미널 이름, 다니는 종류)]
+# 여기 없는 도시는 "<도시>터미널" 하나가 고속·시외를 다 맡는 것으로 본다.
+# (테스트 데이터용 목록. 실제 연동 때는 각 사이트의 터미널 목록을 쓴다.)
+_BOTH = ("고속", "시외")
+TERMINALS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    "서울": [("서울경부", ("고속",)), ("센트럴시티", ("고속",)), ("동서울", _BOTH),
+             ("서울남부", ("시외",)), ("상봉", ("시외",))],
+    "부산": [("부산종합(노포)", _BOTH), ("서부산(사상)", ("시외",)), ("해운대", ("시외",))],
+    "대구": [("동대구", _BOTH), ("서대구", ("시외",)), ("대구북부", ("시외",))],
+    "대전": [("대전복합", _BOTH), ("대전서남부", ("시외",)), ("유성", ("시외",))],
+    "광주": [("광주(유스퀘어)", _BOTH)],
+    "인천": [("인천종합", _BOTH)],
+    "수원": [("수원종합", _BOTH)],
+    "울산": [("울산고속", ("고속",)), ("울산시외", ("시외",))],
+    "진주": [("진주고속", ("고속",)), ("진주시외", ("시외",))],
+    "청주": [("청주고속", ("고속",)), ("청주시외", ("시외",))],
+    "전주": [("전주고속", ("고속",)), ("전주시외", ("시외",))],
+}
+
+
+def terminals_of(city: str, kind: str | None = None) -> list[str]:
+    """도시의 터미널 이름들. kind 를 주면 그 종류가 다니는 터미널만."""
+    entries = TERMINALS.get(city, [(f"{city}터미널", _BOTH)])
+    return [name for name, kinds in entries if kind is None or kind in kinds]
+
+
+TERMINAL_CITY: dict[str, str] = {t: c for c in CITIES for t in terminals_of(c)}
+
+
+def resolve_place(name: str) -> tuple[str, str | None]:
+    """'서울' -> ('서울', None) / '동서울' -> ('서울', '동서울'). 모르면 KeyError."""
+    if name in CITIES:
+        return name, None
+    if name in TERMINAL_CITY:
+        return TERMINAL_CITY[name], name
+    raise KeyError(name)
+
+
+def place_names() -> list[str]:
+    """자동완성용: 도시 이름 + 터미널 이름."""
+    return list(CITIES) + list(TERMINAL_CITY)
+
+
+def place_label(name: str) -> str:
+    """자동완성에 보여줄 글자. '서울 (터미널 전체)' / '동서울 · 서울'."""
+    try:
+        city, term = resolve_place(name)
+    except KeyError:
+        return name
+    return f"{city} (터미널 전체)" if term is None else f"{term} · {city}"
+
+
 # 기차(/기차)에서 쓰는 주요 역이 있는 도시
 TRAIN_CITIES: list[str] = [
     "서울", "수원", "천안", "대전", "대구", "부산", "울산", "경주", "포항",

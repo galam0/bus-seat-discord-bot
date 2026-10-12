@@ -12,7 +12,7 @@ import logging
 import random
 from datetime import date
 
-from cities import CITIES, TRAIN_CITIES
+from cities import CITIES, TRAIN_CITIES, place_names, terminals_of
 from midpoint import est_minutes, haversine_km
 from models import BusSearch, BusTrip, TrainTrip
 
@@ -33,6 +33,30 @@ def _hhmm(total_minutes: int) -> str:
 
 # ---------------------------------------------------------------- 테스트 데이터
 
+# 서울 터미널을 실제 노선 성격과 비슷하게 고르기 위한 지역 묶음
+_HONAM = {"광주", "목포", "순천", "여수", "전주", "익산", "군산", "논산"}
+_EAST = {"춘천", "강릉", "속초", "원주", "충주", "제천", "안동"}
+
+
+def _mock_terminal(city: str, other: str, kind: str, rng: random.Random) -> str:
+    """city 쪽에서 other 로 오가는 kind 버스가 쓰는 터미널을 고른다."""
+    if city == "서울":
+        if kind == "고속":
+            if other in _HONAM:
+                return "센트럴시티"
+            if other in _EAST:
+                return "동서울"
+            return "서울경부" if rng.random() < 0.8 else "동서울"
+        if other in _EAST:
+            return "동서울" if rng.random() < 0.7 else "상봉"
+        return "서울남부" if rng.random() < 0.7 else "동서울"
+    options = terminals_of(city, kind)
+    # 첫 번째(대표) 터미널이 대부분, 나머지가 가끔
+    if len(options) > 1 and rng.random() < 0.3:
+        return rng.choice(options[1:])
+    return options[0]
+
+
 class _MockBusBase:
     kind = "고속"
     label = ""
@@ -43,9 +67,10 @@ class _MockBusBase:
     fare_per_km = (125, 80)  # 우등, 일반 (원/km)
 
     async def terminals(self) -> list[str]:
-        return list(CITIES)
+        return place_names()
 
     async def search(self, dep: str, arr: str, day: date) -> list[BusTrip]:
+        """dep/arr 는 도시 이름. 각 편에 출발·도착 터미널을 붙여서 돌려준다."""
         if dep not in CITIES or arr not in CITIES:
             return []
         km = haversine_km(CITIES[dep], CITIES[arr])
@@ -65,7 +90,9 @@ class _MockBusBase:
             per_km = self.fare_per_km[0] if premium else self.fare_per_km[1]
             fare = max(int(km * per_km / 100) * 100, 3000)
             trips.append(BusTrip(_hhmm(t), _hhmm(t + ride), "우등" if premium else "일반",
-                                 fare, total, free, self.kind))
+                                 fare, total, free, self.kind,
+                                 _mock_terminal(dep, arr, self.kind, rng),
+                                 _mock_terminal(arr, dep, self.kind, rng)))
             t += rng.choice(self.gaps)
         return trips
 

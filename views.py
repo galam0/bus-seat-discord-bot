@@ -77,8 +77,8 @@ class ResultView(_OwnerOnly):
         if on_seat and n:
             options = [
                 discord.SelectOption(
-                    label=f"{t.depart} [{t.kind}] {t.grade}",
-                    description="매진" if t.sold_out else f"잔여 {t.seats_left}석",
+                    label=f"{t.depart} {t.route or t.grade}"[:100],
+                    description=f"[{t.kind}] {t.grade} · " + ("매진" if t.sold_out else f"잔여 {t.seats_left}석"),
                     value=str(i),  # 전체 목록 기준 번호
                 )
                 for i, t in enumerate(trips[start:end], start=start)

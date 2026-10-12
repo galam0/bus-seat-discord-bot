@@ -182,7 +182,8 @@ class ViewTest(unittest.TestCase):
             v = ResultView(1, AsyncMock(), trips=trips, page=0, on_page=AsyncMock(), on_seat=AsyncMock())
             select, prev, nxt, back = v.children
             self.assertEqual([o.value for o in select.options], [str(i) for i in range(PAGE_SIZE)])
-            self.assertIn("[", select.options[0].label)
+            self.assertIn("→", select.options[0].label)  # 터미널 경로
+            self.assertIn("[", select.options[0].description)
             self.assertTrue(prev.disabled)
             self.assertFalse(nxt.disabled)
             self.assertEqual(back.label, "다른 날짜")
@@ -333,6 +334,79 @@ class CommandRegistrationTest(unittest.TestCase):
     def test_commands_registered(self):
         names = {c.name for c in bot.tree.get_commands()}
         self.assertEqual(names, {"버스", "기차", "중간도시"})
+
+
+class TerminalTest(unittest.TestCase):
+    def test_resolve(self):
+        from cities import place_label, resolve_place, terminals_of
+        self.assertEqual(resolve_place("서울"), ("서울", None))
+        self.assertEqual(resolve_place("동서울"), ("서울", "동서울"))
+        self.assertEqual(resolve_place("강릉터미널"), ("강릉", "강릉터미널"))
+        with self.assertRaises(KeyError):
+            resolve_place("뉴욕")
+        self.assertEqual(place_label("동서울"), "동서울 · 서울")
+        self.assertEqual(place_label("서울"), "서울 (터미널 전체)")
+        self.assertEqual(terminals_of("진주", "고속"), ["진주고속"])
+        for city in ("서울", "부산", "진주", "강릉"):  # 모든 도시에 고속·시외 터미널이 하나씩은 있어야 함
+            self.assertTrue(terminals_of(city, "고속") and terminals_of(city, "시외"))
+
+    def test_mock_trips_have_matching_terminals(self):
+        from cities import TERMINALS, terminals_of
+        r = run(MockBusProvider().search("진주", "서울", TODAY))
+        for t in r.trips:
+            self.assertIn(t.dep_terminal, terminals_of("진주", t.kind))
+            self.assertIn(t.arr_terminal, terminals_of("서울", t.kind))
+            self.assertIn("→", t.route)
+        # 호남 고속은 센트럴시티, 강원 고속은 동서울
+        r = run(MockBusProvider().search("서울", "광주", TODAY))
+        self.assertEqual({t.dep_terminal for t in r.trips if t.kind == "고속"}, {"센트럴시티"})
+        r = run(MockBusProvider().search("강릉", "서울", TODAY))
+        self.assertEqual({t.arr_terminal for t in r.trips if t.kind == "고속"}, {"동서울"})
+
+    def test_autocomplete_lists_terminals(self):
+        names = run(MockBusProvider().terminals())
+        self.assertIn("서울", names)
+        self.assertIn("동서울", names)
+        self.assertIn("진주고속", names)
+
+
+@needs_discord
+class TerminalFlowTest(unittest.TestCase):
+    def test_embed_shows_route(self):
+        trips = [BusTrip("06:00", "10:44", "우등", 35400, 28, (1,), "고속", "진주고속", "서울경부")]
+        e = bus_embed("진주", "서울", "오늘", trips, ["테스트"])
+        self.assertIn("**진주고속 → 서울경부**", e.description)
+
+    def test_terminal_filter(self):
+        async def go():
+            flow = Flow("bus", MockBusProvider(), "동서울", "강릉", 1)
+            self.assertEqual((flow.q_dep, flow.dep_term), ("서울", "동서울"))
+            i = fake_interaction()
+            await flow.pick(i, date(2026, 10, 20))
+            self.assertTrue(flow.trips)
+            self.assertEqual({t.dep_terminal for t in flow.trips}, {"동서울"})
+            self.assertIn("동서울 → 강릉", i.edit_original_response.await_args.kwargs["embed"].title)
+
+            all_flow = Flow("bus", MockBusProvider(), "서울", "강릉", 1)
+            await all_flow.pick(fake_interaction(), date(2026, 10, 20))
+            self.assertGreater(len(all_flow.trips), len(flow.trips))  # 상봉 출발 시외도 포함
+
+        run(go())
+
+    def test_seat_header_has_route(self):
+        async def go():
+            flow = Flow("bus", MockBusProvider(), "진주", "서울", 1)
+            await flow.pick(fake_interaction(), date(2026, 10, 20))
+            idx = next(n for n, t in enumerate(flow.trips) if not t.sold_out)
+            s = fake_interaction()
+            await flow.seat(s, idx)
+            self.assertIn(flow.trips[idx].route, s.response.send_message.await_args.args[0])
+
+        run(go())
+
+    def test_same_city(self):
+        self.assertTrue(bot.same_city("동서울", "서울경부"))
+        self.assertFalse(bot.same_city("동서울", "강릉"))
 
 
 if __name__ == "__main__":
