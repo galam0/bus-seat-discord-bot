@@ -59,6 +59,13 @@ class _Canvas:
             s = s[:-1]
         return s + "…"
 
+    def line(self, pts, fill, width=1):
+        self.d.line([(x * SCALE, y * SCALE) for x, y in pts], fill=fill, width=int(width * SCALE), joint="curve")
+
+    def circle(self, x, y, r, fill, outline=None, width=1):
+        box = [(x - r) * SCALE, (y - r) * SCALE, (x + r) * SCALE, (y + r) * SCALE]
+        self.d.ellipse(box, fill=fill, outline=outline, width=int(width * SCALE))
+
     def png(self) -> BytesIO:
         buf = BytesIO()
         self.img.save(buf, "PNG", compress_level=6)

@@ -387,7 +387,7 @@ class FlowTest(unittest.TestCase):
 class CommandRegistrationTest(unittest.TestCase):
     def test_commands_registered(self):
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"버스", "기차", "중간도시"})
+        self.assertEqual(names, {"버스", "기차", "중간도시", "지하철", "노선도", "도착", "날씨"})
 
 
 class TerminalTest(unittest.TestCase):

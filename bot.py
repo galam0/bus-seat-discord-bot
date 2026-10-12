@@ -13,6 +13,7 @@ from embeds import (BUS_IMAGE, SEAT_IMAGE, bus_embed, bus_image_embed, bus_subti
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
 from seatmap import render_seat_map
+import travel
 from views import DateView, ResultView, date_label
 
 try:  # Pillow 가 없으면 글자로만 보여준다
@@ -172,6 +173,7 @@ class SeatBot(discord.Client):
         self.train = None
 
     async def setup_hook(self):
+        await travel.state.start()  # 지하철 데이터는 뒤에서 불러온다
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
             guild = discord.Object(int(guild_id))
@@ -268,7 +270,11 @@ async def mid_cmd(interaction: discord.Interaction, a: str, b: str,
     except ValueError as err:
         await interaction.response.send_message(str(err), ephemeral=True)
         return
-    await interaction.response.send_message(embed=midpoint_embed(origins, cands))
+    view = travel.MidpointBusView(origins, cands[0].city, lambda i, dep, arr: _start(i, "bus", dep, arr))
+    await interaction.response.send_message(embed=midpoint_embed(origins, cands), view=view)
+
+
+travel.register(tree)
 
 
 async def start_health_server(port: int):
@@ -292,9 +298,6 @@ async def start_health_server(port: int):
 async def amain():
     port = os.getenv("PORT")  # Render 가 넣어줌. 로컬에선 보통 비어 있음
     runner = await start_health_server(int(port)) if port else None
-    if port:  # (임시) Render 에서만 공개 API 응답 형식 확인
-        from probe import run_probe
-        asyncio.get_running_loop().create_task(run_probe())
     token = os.getenv("DISCORD_TOKEN")
     try:
         if not token:
@@ -308,6 +311,7 @@ async def amain():
         async with client:
             await client.start(token)
     finally:
+        await travel.state.close()
         if runner is not None:
             await runner.cleanup()
 
