@@ -373,7 +373,7 @@ class FoodTest(unittest.TestCase):
         self.assertEqual(kw["embed"].title, "🍽️ 전주에서 뭐 먹지?")
         self.assertIn("3곳 중", kw["embed"].footer)
         labels = [b.label for b in kw["view"].children]
-        self.assertEqual(labels, ["다시 뽑기", "지도", "맛집 목록"])
+        self.assertEqual(labels, ["다시 뽑기", "지도", "근처 맛집 목록"])
         self.assertTrue(kw["view"].children[1].url.startswith("https://map.kakao.com/link/search/"))
         first = kw["view"].seen
         seen_titles = set(first)
@@ -394,10 +394,67 @@ class FoodTest(unittest.TestCase):
         run(self.travel.send_food(i, "전주"))
         self.assertIn("활용신청", i.followup.send.await_args.args[0])
 
-    def test_unknown_city(self):
+    def test_unknown_place(self):
+        empty = {"response": {"header": {"resultCode": "0000"}, "body": {"items": ""}}}
+        self.travel.state.session.get = MagicMock(return_value=_Resp(empty))
         i = fake_interaction()
-        run(self.travel.send_food(i, "뉴욕"))
-        self.assertIn("자동완성", i.response.send_message.await_args.args[0])
+        run(self.travel.send_food(i, "없는곳123"))
+        self.assertIn("못 찾았어요", i.followup.send.await_args.args[0])
+
+    def test_resolve_point(self):
+        t = self.travel
+        self.assertEqual(run(t.resolve_point("도시:전주")).kind, "도시")
+        self.assertIsNone(run(t.resolve_point("도시:뉴욕")))
+        self.assertEqual(run(t.resolve_point("전주")).label, "전주")
+        # 이름 검색: 관광공사 searchKeyword2 첫 결과의 좌표
+        pt = run(t.resolve_point("가 식당"))
+        self.assertEqual((pt.kind, pt.label, pt.key), ("장소", "가 식당", "장소:가 식당"))
+        self.assertAlmostEqual(pt.lat, 35.82)
+        url = t.state.session.get.call_args.args[0]
+        self.assertTrue(url.endswith("/searchKeyword2"))
+
+    def test_nearby(self):
+        i = fake_interaction()
+        run(self.travel.send_nearby(i, "장소:경포대", "숙소"))
+        kw = i.followup.send.await_args.kwargs
+        self.assertIn("근처 숙소", kw["embed"].title)
+        self.assertIn("](https://map.kakao.com/link/search/", kw["embed"].description)
+        self.assertIn("1km 안", kw["embed"].footer)
+        labels = [b.label for b in kw["view"].children]
+        self.assertEqual(labels, ["맛집", "숙소", "관광지", "문화시설", "레포츠"])
+        self.assertTrue(kw["view"].children[1].disabled)
+        params = self.travel.state.session.get.call_args.kwargs["params"]
+        self.assertEqual((params["contentTypeId"], params["radius"]), ("32", "1000"))
+        # 다른 종류 버튼은 다시 장소를 찾지 않고 바로 바꿈
+        calls = self.travel.state.session.get.call_count
+        b = fake_interaction()
+        run(kw["view"].children[0].callback(b))
+        self.assertIn("근처 맛집", b.edit_original_response.await_args.kwargs["embed"].title)
+        self.assertEqual(self.travel.state.session.get.call_count, calls + 1)
+
+    def test_nearby_widens(self):
+        empty = {"response": {"header": {"resultCode": "0000"}, "body": {"items": ""}}}
+        self.travel.state.session.get = MagicMock(side_effect=[_Resp(empty), _Resp(FOOD)])
+        i = fake_interaction()
+        run(self.travel.send_nearby(i, "도시:전주", "맛집"))
+        e = i.followup.send.await_args.kwargs["embed"]
+        self.assertIn("5km까지 넓혀", e.description)
+        self.assertIn("5km 안", e.footer)
+
+    def test_station_point(self):
+        from types import SimpleNamespace
+        net = SimpleNamespace(by_name={"강남": ["a", "b"]},
+                              nodes={"a": SimpleNamespace(lat=37.49, lon=127.02),
+                                     "b": SimpleNamespace(lat=37.51, lon=127.04)})
+        saved = self.travel.state.subway.net
+        self.travel.state.subway.net = net
+        try:
+            pt = run(self.travel.resolve_point("역:강남"))
+            self.assertEqual((pt.label, pt.kind), ("강남역", "역"))
+            self.assertAlmostEqual(pt.lat, 37.50)
+            self.assertEqual(run(self.travel.resolve_point("강남역")).key, "역:강남")
+        finally:
+            self.travel.state.subway.net = saved
 
 
 class TimelineImageTest(unittest.TestCase):

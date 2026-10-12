@@ -1,5 +1,6 @@
 """여행 명령어: /지하철 /노선도 /도착 /날씨, 그리고 /중간도시 결과의 버스 바로가기 버튼."""
 import asyncio
+from dataclasses import dataclass
 import random
 import logging
 import os
@@ -220,6 +221,14 @@ class RouteView(discord.ui.View):
     @discord.ui.button(label="출발역 실시간 도착", emoji="⏱️", style=discord.ButtonStyle.secondary)
     async def arrivals(self, interaction: discord.Interaction, _button):
         await send_arrivals(interaction, self.src, ephemeral=True)
+
+    @discord.ui.button(label="도착역 근처 맛집", emoji="🍽️", style=discord.ButtonStyle.secondary)
+    async def near_food(self, interaction: discord.Interaction, _button):
+        await send_nearby(interaction, f"역:{self.dst}", "맛집")
+
+    @discord.ui.button(label="도착역 근처 숙소", emoji="🏨", style=discord.ButtonStyle.secondary)
+    async def near_stay(self, interaction: discord.Interaction, _button):
+        await send_nearby(interaction, f"역:{self.dst}", "숙소")
 
 
 async def subway_route(interaction: discord.Interaction, src: str, dst: str):
@@ -517,72 +526,166 @@ async def send_tour(interaction: discord.Interaction, city: str, kind: str = "�
         await interaction.followup.send(embed=embed, view=view)
 
 
+# ---------------------------------------------------------------- 장소 찾기 (역·도시·이름)
+
+@dataclass
+class Spot0:
+    """검색 기준점."""
+    label: str  # '강남역', '전주', '경포대'
+    lat: float
+    lon: float
+    kind: str  # 역 / 도시 / 장소
+    key: str  # 다시 찾을 때 쓰는 값 ('역:강남', '도시:전주', '장소:경포대')
+
+    @property
+    def wide(self) -> bool:
+        return self.kind == "도시"
+
+
+def _station_point(name: str) -> Spot0 | None:
+    net = state.subway.net
+    if net is None or name not in net.by_name:
+        return None
+    pts = [(n.lat, n.lon) for i in net.by_name[name] if (n := net.nodes[i]).lat is not None]
+    if not pts:
+        return None
+    lat = sum(p[0] for p in pts) / len(pts)
+    lon = sum(p[1] for p in pts) / len(pts)
+    return Spot0(f"{name}역", lat, lon, "역", f"역:{name}")
+
+
+def _city_point(name: str) -> Spot0 | None:
+    if name not in PLACES:
+        return None
+    lat, lon = PLACES[name]
+    return Spot0(name, lat, lon, "도시", f"도시:{name}")
+
+
+async def resolve_point(text: str) -> Spot0 | None:
+    """'역:강남' / '도시:전주' / 그냥 이름. 이름은 도시 → 역 → 관광공사 장소 검색 순."""
+    text = (text or "").strip()
+    if ":" in text:
+        kind, name = text.split(":", 1)
+        if kind == "역":
+            return _station_point(name)
+        if kind == "도시":
+            return _city_point(name)
+        text = name
+    if not text:
+        return None
+    hit = _city_point(text) or _station_point(text)
+    if not hit and text.endswith("역"):
+        hit = _station_point(text[:-1])
+    if hit:
+        return hit
+    if not state.kma_key:
+        return None
+    found = await tour.search_keyword(state.session, state.kma_key, text)
+    if not found:
+        return None
+    title, lat, lon, _addr = found
+    return Spot0(title, lat, lon, "장소", f"장소:{text}")
+
+
+async def point_autocomplete(interaction: discord.Interaction, current: str):
+    out = [app_commands.Choice(name=f"🏙️ {n}", value=f"도시:{n}") for n in match_names(list(PLACES), current, 8)]
+    net = state.subway.net
+    if net is not None:
+        cur = current.strip()
+        cur = cur[:-1] if cur.endswith("역") and len(cur) > 1 else cur
+        for n in match_names(net.station_names(), cur, 25 - len(out)):
+            lines = net.lines_at(n)
+            label = f"🚇 {n}역 · {', '.join(lines[:3])}" + (" 외" if len(lines) > 3 else "")
+            out.append(app_commands.Choice(name=label[:100], value=f"역:{n}"))
+    text = current.strip()
+    names = {c.value.split(":", 1)[1] for c in out}
+    if text and text not in names and text.removesuffix("역") not in names:
+        search = app_commands.Choice(name=f"🔎 '{text}' 이름으로 찾기"[:100], value=f"장소:{text}"[:100])
+        out = [search] + out[:24]
+    return out[:25]
+
+
+def kakao_link(*words: str) -> str:
+    return "https://map.kakao.com/link/search/" + quote(" ".join(w for w in words if w))
+
+
+def _dist(km: float | None) -> str:
+    if km is None:
+        return ""
+    return f"{km * 1000:.0f}m" if km < 1 else f"{km:.1f}km"
+
+
+_NOT_FOUND = "그 장소를 못 찾았어요. 자동완성 목록에서 고르거나 다른 이름으로 적어 보세요."
+
+
 # ---------------------------------------------------------------- 뭐먹지
 
 _food_cache: dict[str, tuple[datetime, list]] = {}
 FOOD_TTL = timedelta(hours=6)
 
 
-async def _food_pool(city: str) -> list:
+async def _food_pool(pt: Spot0) -> list:
     now = datetime.now(KST)
-    hit = _food_cache.get(city)
+    hit = _food_cache.get(pt.key)
     if hit and now - hit[0] < FOOD_TTL:
         return hit[1]
-    sido = sido_of(city)
-    spots = await tour.fetch_spots(state.session, state.kma_key, "맛집", PLACES[city], sido[1] if sido else None,
-                                   now.date(), radius_m=10000, limit=60)
+    radius = 10000 if pt.wide else 1500
+    spots = await tour.fetch_spots(state.session, state.kma_key, "맛집", (pt.lat, pt.lon), None, now.date(),
+                                   radius_m=radius, limit=60)
     spots = [p for p in spots if p.title]
     if len(_food_cache) > 100:
         _food_cache.clear()
-    _food_cache[city] = (now, spots)
+    _food_cache[pt.key] = (now, spots)
     return spots
 
 
-def food_embed(city: str, spot, n: int) -> discord.Embed:
+def food_embed(pt: Spot0, spot, n: int) -> discord.Embed:
     lines = [f"## {spot.title}"]
     if spot.cat:
         lines.append(f"🍴 {spot.cat}")
     if spot.addr:
         lines.append(f"📍 {spot.addr}")
     if spot.km is not None:
-        lines.append(f"📏 {city} 중심에서 {spot.km:.1f}km")
-    e = discord.Embed(title=f"🍽️ {city}에서 뭐 먹지?", description="\n".join(lines), color=0xF0A030)
+        lines.append(f"📏 {pt.label}{' 중심' if pt.wide else ''}에서 {_dist(spot.km)}")
+    e = discord.Embed(title=f"🍽️ {pt.label}에서 뭐 먹지?", description="\n".join(lines), color=0xF0A030)
     if spot.image:
         e.set_image(url=spot.image)
-    e.set_footer(text=f"{city} 근처 맛집 {n}곳 중에서 뽑았어요 · 한국관광공사 · 영업시간은 가기 전에 확인하세요")
+    e.set_footer(text=f"{pt.label} 근처 맛집 {n}곳 중에서 뽑았어요 · 한국관광공사 · 영업시간은 가기 전에 확인하세요")
     return e
 
 
 class FoodView(discord.ui.View):
-    def __init__(self, city: str, spot, seen: set[str]):
+    def __init__(self, pt: Spot0, spot, seen: set[str]):
         super().__init__(timeout=1800)
-        self.city, self.seen = city, seen
+        self.pt, self.seen = pt, seen
         again = discord.ui.Button(label="다시 뽑기", emoji="🎲", style=discord.ButtonStyle.primary)
         again.callback = self.reroll
         self.add_item(again)
-        q = quote(f"{city} {spot.title}")
-        self.add_item(discord.ui.Button(label="지도", emoji="🗺️", url=f"https://map.kakao.com/link/search/{q}"))
-        more = discord.ui.Button(label="맛집 목록", emoji="📋")
+        area = spot.addr.split(" ")[1] if len(spot.addr.split(" ")) > 1 else ""
+        self.add_item(discord.ui.Button(label="지도", emoji="🗺️", url=kakao_link(area, spot.title)))
+        more = discord.ui.Button(label="근처 맛집 목록", emoji="📋")
         more.callback = self.listing
         self.add_item(more)
 
     async def reroll(self, interaction: discord.Interaction):
-        await send_food(interaction, self.city, seen=self.seen, edit=True)
+        await send_food(interaction, self.pt.key, seen=self.seen, edit=True, point=self.pt)
 
     async def listing(self, interaction: discord.Interaction):
-        await send_tour(interaction, self.city, "맛집")
+        await send_nearby(interaction, self.pt.key, "맛집", point=self.pt)
 
 
-async def send_food(interaction: discord.Interaction, city: str, seen: set[str] | None = None, edit: bool = False):
-    if city not in PLACES:
-        await interaction.response.send_message("자동완성 목록에서 도시를 골라주세요.", ephemeral=True)
-        return
+async def send_food(interaction: discord.Interaction, place: str, seen: set[str] | None = None, edit: bool = False,
+                    point: Spot0 | None = None):
     if not state.kma_key:
         await interaction.response.send_message("⚠️ 공공데이터포털 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
         return
     await (interaction.response.defer() if edit else interaction.response.defer(thinking=True))
     try:
-        pool = await _food_pool(city)
+        pt = point or await resolve_point(place)
+        if pt is None:
+            await interaction.followup.send(_NOT_FOUND, ephemeral=True)
+            return
+        pool = await _food_pool(pt)
     except Exception as e:
         log.warning("뭐먹지 실패: %s", str(e)[:150])
         await interaction.followup.send(
@@ -590,7 +693,7 @@ async def send_food(interaction: discord.Interaction, city: str, seen: set[str] 
             ephemeral=True)
         return
     if not pool:
-        await interaction.followup.send(f"{city} 근처에서 맛집 정보를 못 찾았어요.", ephemeral=True)
+        await interaction.followup.send(f"{pt.label} 근처에서 맛집 정보를 못 찾았어요.", ephemeral=True)
         return
     seen = set(seen or ())
     fresh = [p for p in pool if p.title not in seen] or pool
@@ -598,7 +701,91 @@ async def send_food(interaction: discord.Interaction, city: str, seen: set[str] 
     seen.add(spot.title)
     if len(seen) >= len(pool):
         seen = {spot.title}
-    embed, view = food_embed(city, spot, len(pool)), FoodView(city, spot, seen)
+    embed, view = food_embed(pt, spot, len(pool)), FoodView(pt, spot, seen)
+    if edit:
+        await interaction.edit_original_response(embed=embed, view=view)
+    else:
+        await interaction.followup.send(embed=embed, view=view)
+
+
+# ---------------------------------------------------------------- 근처
+
+NEAR_KINDS = ["맛집", "숙소", "관광지", "문화시설", "레포츠"]
+RADII = {"500m": 500, "1km": 1000, "2km": 2000, "5km": 5000}
+
+
+def nearby_embed(pt: Spot0, kind: str, spots, radius: int, widened: bool) -> discord.Embed:
+    emoji = tour.KIND_EMOJI[kind]
+    r = f"{radius // 1000}km" if radius >= 1000 else f"{radius}m"
+    e = discord.Embed(title=f"{emoji} {pt.label} 근처 {kind}", color=0x2EB872)
+    if not spots:
+        e.description = f"{r} 안에서 찾지 못했어요. 거리를 넓혀 보세요."
+    lines = []
+    area = ""
+    for sp in spots:
+        parts = sp.addr.split(" ")
+        area = area or (parts[1] if len(parts) > 1 else "")
+        meta = [x for x in (_dist(sp.km), sp.cat, " ".join(parts[1:3])) if x]
+        lines.append(f"**[{sp.title}]({kakao_link(parts[1] if len(parts) > 1 else '', sp.title)})**\n└ "
+                     + " · ".join(meta))
+    if lines:
+        e.description = ("\n".join(lines))[:4000]
+        if widened:
+            e.description = f"가까이엔 없어서 {r}까지 넓혀 찾았어요.\n\n" + e.description
+    img = next((sp.image for sp in spots if sp.image), "")
+    if img:
+        e.set_image(url=img)
+    where = {"역": "역", "도시": "도시 중심", "장소": "그 장소"}[pt.kind]
+    e.set_footer(text=f"{where}에서 가까운 순 · {r} 안 · 이름을 누르면 카카오맵 · 한국관광공사")
+    return e
+
+
+class NearbyView(discord.ui.View):
+    def __init__(self, pt: Spot0, current: str, radius: int | None):
+        super().__init__(timeout=1800)
+        for kind in NEAR_KINDS:
+            on = kind == current
+            b = discord.ui.Button(label=kind, emoji=tour.KIND_EMOJI[kind], disabled=on,
+                                  style=discord.ButtonStyle.primary if on else discord.ButtonStyle.secondary)
+            b.callback = self._cb(pt, kind, radius)
+            self.add_item(b)
+
+    @staticmethod
+    def _cb(pt, kind, radius):
+        async def cb(interaction: discord.Interaction):
+            await send_nearby(interaction, pt.key, kind, radius, edit=True, point=pt)
+
+        return cb
+
+
+async def send_nearby(interaction: discord.Interaction, place: str, kind: str = "맛집", radius: int | None = None,
+                      edit: bool = False, point: Spot0 | None = None):
+    kind = kind if kind in NEAR_KINDS else "맛집"
+    if not state.kma_key:
+        await interaction.response.send_message("⚠️ 공공데이터포털 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    await (interaction.response.defer() if edit else interaction.response.defer(thinking=True))
+    try:
+        pt = point or await resolve_point(place)
+        if pt is None:
+            await interaction.followup.send(_NOT_FOUND, ephemeral=True)
+            return
+        r = radius or (3000 if pt.wide else 1000)
+        today = datetime.now(KST).date()
+        spots = await tour.fetch_spots(state.session, state.kma_key, kind, (pt.lat, pt.lon), None, today,
+                                       radius_m=r, limit=10)
+        widened = False
+        if not spots and radius is None and r < 5000:  # 거리를 안 정했으면 한 번 넓혀 본다
+            r, widened = 5000, True
+            spots = await tour.fetch_spots(state.session, state.kma_key, kind, (pt.lat, pt.lon), None, today,
+                                           radius_m=r, limit=10)
+    except Exception as e:
+        log.warning("근처 실패: %s", str(e)[:150])
+        await interaction.followup.send(
+            f"근처 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})",
+            ephemeral=True)
+        return
+    embed, view = nearby_embed(pt, kind, spots, r, widened), NearbyView(pt, kind, radius)
     if edit:
         await interaction.edit_original_response(embed=embed, view=view)
     else:
@@ -843,11 +1030,23 @@ async def tour_kind_autocomplete(interaction: discord.Interaction, current: str)
 def register(tree: app_commands.CommandTree, start_bus=None):
     trips_ui.register(tree, start_bus=start_bus, send_weather=send_weather, send_tour=send_tour, send_food=send_food)
 
-    @tree.command(name="뭐먹지", description="도시 근처 맛집 하나를 랜덤으로 골라줘요 (한국관광공사)")
-    @app_commands.rename(city="도시")
-    @app_commands.autocomplete(city=city_autocomplete)
-    async def food_cmd(interaction: discord.Interaction, city: str):
-        await send_food(interaction, city)
+    @tree.command(name="뭐먹지", description="역·도시·장소 근처 맛집 하나를 랜덤으로 골라줘요 (한국관광공사)")
+    @app_commands.rename(place="장소")
+    @app_commands.describe(place="지하철역, 도시, 또는 장소 이름 (예: 홍대입구역, 전주, 경포대)")
+    @app_commands.autocomplete(place=point_autocomplete)
+    async def food_cmd(interaction: discord.Interaction, place: str):
+        await send_food(interaction, place)
+
+    @tree.command(name="근처", description="역·도시·장소 근처 맛집·숙소·관광지를 가까운 순으로 보여줘요")
+    @app_commands.rename(place="장소", kind="종류", radius="거리")
+    @app_commands.describe(place="지하철역, 도시, 또는 장소 이름 (예: 강남역, 강릉, 경포대)",
+                           radius="비우면 역·장소는 1km, 도시는 3km")
+    @app_commands.choices(kind=[app_commands.Choice(name=k, value=k) for k in NEAR_KINDS],
+                          radius=[app_commands.Choice(name=k, value=v) for k, v in RADII.items()])
+    @app_commands.autocomplete(place=point_autocomplete)
+    async def near_cmd(interaction: discord.Interaction, place: str, kind: str | None = None,
+                       radius: int | None = None):
+        await send_nearby(interaction, place, kind or "맛집", radius)
     _start_bus_hook["fn"] = start_bus
 
     @tree.command(name="혼잡", description="서울 주요 장소의 지금 혼잡도와 앞으로 예측을 보여줘요")

@@ -181,7 +181,7 @@ async def handle_component(interaction: discord.Interaction) -> bool:
     elif action == "tour":
         await _hooks["send_tour"](interaction, trip.place, "관광지")
     elif action == "food":
-        await _hooks["send_food"](interaction, trip.place)
+        await _hooks["send_food"](interaction, f"도시:{trip.place}")
     elif action == "timeline":
         await send_timeline(interaction, trip)
     elif action == "bus":

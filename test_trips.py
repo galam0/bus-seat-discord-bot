@@ -315,7 +315,7 @@ class TripUITest(unittest.TestCase):
         self.hooks["send_tour"].assert_awaited_with(t, "강릉", "관광지")
         f = fake_interaction(custom_id="trip:food:1")
         run(self.ui.handle_component(f))
-        self.hooks["send_food"].assert_awaited_with(f, "강릉")
+        self.hooks["send_food"].assert_awaited_with(f, "도시:강릉")
         trip = self.ui.book.trips[1]
         run(self.ui.book.add_item(trip, trip.start_date, "14:00", "안목 커피거리", 7))
         tl = fake_interaction(custom_id="trip:timeline:1")

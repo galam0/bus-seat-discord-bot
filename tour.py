@@ -100,3 +100,16 @@ async def fetch_spots(session, key: str, kind: str, center: tuple[float, float],
     params = {**_common(key), "numOfRows": str(limit), "arrange": "E", "mapX": f"{lon:.6f}", "mapY": f"{lat:.6f}",
               "radius": str(radius_m), "contentTypeId": str(KINDS[kind])}
     return parse_spots(await _get(session, f"{BASE}/locationBasedList2", params), center)
+
+
+async def search_keyword(session, key: str, keyword: str) -> tuple[str, float, float, str] | None:
+    """장소 이름으로 찾기 -> (이름, 위도, 경도, 주소). 좌표가 있는 첫 결과."""
+    params = {**_common(key), "numOfRows": "10", "arrange": "A", "keyword": keyword}
+    for it in _items(await _get(session, f"{BASE}/searchKeyword2", params)):
+        try:
+            lat, lon = float(it["mapy"]), float(it["mapx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if lat and lon:
+            return str(it.get("title", keyword)).strip(), lat, lon, str(it.get("addr1", "")).strip()
+    return None
