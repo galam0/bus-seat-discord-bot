@@ -294,11 +294,13 @@ LINK_FIXES: dict[str, dict[str, list[tuple[str, str]]]] = {
     "6호선": {"remove": [("구산", "새절")], "add": [("구산", "응암"), ("응암", "새절")]},
     # 삼성역 구간 미개통: 운정중앙~서울역, 수서~동탄 따로 운행
     "GTX-A": {"remove": [("서울", "수서")]},
-    "경의중앙선": {"remove": [("공덕", "이촌"), ("신촌", "서강대")],
-               "add": [("용산", "효창공원앞"), ("신촌", "가좌")]},
+    # 용산 - 효창공원앞 - 공덕 - 서강대 / 서울역 - 신촌 - 가좌 (추정 연결이 좌표에 따라 달라져서 넉넉히 적어 둠)
+    "경의중앙선": {"remove": [("공덕", "이촌"), ("공덕", "용산"), ("신촌", "서강대")],
+               "add": [("용산", "효창공원앞"), ("효창공원앞", "공덕"), ("신촌", "가좌")]},
     "경춘선": {"remove": [("광운대", "청량리")], "add": [("광운대", "상봉")]},
+    # 서울역 - 공덕 - 홍대입구 - 디지털미디어시티 - 마곡나루 - 김포공항 - 계양 - 검암 - 청라국제도시 - 영종 - 운서 - ...
     "공항철도": {"remove": [("디지털미디어시티", "김포공항"), ("운서", "검암")],
-             "add": [("검암", "청라국제도시")]},
+             "add": [("검암", "청라국제도시"), ("디지털미디어시티", "마곡나루")]},
 }
 
 
@@ -311,8 +313,7 @@ def apply_fixes(net: Network, fixes) -> None:
         for a, b in fx.get("remove", []):
             ia, ib = ids.get(a), ids.get(b)
             if ia is None or ib is None or ib not in net.adj[ia]:
-                log.warning("연결 보정: %s %s-%s 없음 (데이터가 바뀌었을 수 있어요)", line, a, b)
-                continue
+                continue  # 이미 없으면 그대로
             del net.adj[ia][ib], net.adj[ib][ia]
             edges[:] = [e for e in edges if set(e) != {ia, ib}]
         for a, b in fx.get("add", []):
