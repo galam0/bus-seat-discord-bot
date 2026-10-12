@@ -387,7 +387,17 @@ class FlowTest(unittest.TestCase):
 class CommandRegistrationTest(unittest.TestCase):
     def test_commands_registered(self):
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"버스", "기차", "중간도시", "지하철", "노선도", "도착", "날씨", "관광", "막차", "여행", "혼잡", "어디가지"})
+        self.assertEqual(names, {"버스", "기차", "중간도시", "지하철", "노선도", "도착", "날씨", "관광", "막차", "여행", "혼잡", "어디가지", "도움말"})
+
+    def test_help_covers_every_command(self):
+        import guide
+        listed = " ".join(c for _, _, cmds in guide.SECTIONS.values() for c, _, _ in cmds)
+        for c in bot.tree.get_commands():
+            if c.name != "도움말":
+                self.assertIn(f"/{c.name}", listed)
+        import trips_ui
+        for sub in trips_ui.group.commands:
+            self.assertIn(sub.name, listed)
 
 
 class TerminalTest(unittest.TestCase):

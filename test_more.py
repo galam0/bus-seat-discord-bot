@@ -339,5 +339,34 @@ class CrowdRouletteTrainUITest(unittest.TestCase):
         self.assertIn("시간표·요금만", e.footer)
 
 
+class GuideTest(unittest.TestCase):
+    def test_home_and_sections(self):
+        import guide
+        home = guide.help_embed(None)
+        self.assertIn("도움말", home.title)
+        self.assertEqual(len(home.fields), len(guide.SECTIONS))
+        for name in guide.SECTIONS:
+            e = guide.help_embed(name)
+            self.assertIn(name, e.title)
+            for field_name, value in e.fields:
+                self.assertLessEqual(len(value), 1024)
+                self.assertIn("예) `/", value)
+        self.assertIn("도움말", guide.help_embed("없는 분류").title)
+
+    def test_buttons_switch(self):
+        import guide
+        i = fake_interaction()
+        run(guide.send_help(i, "지하철"))
+        kw = i.response.send_message.await_args.kwargs
+        self.assertTrue(kw["ephemeral"])
+        self.assertIn("지하철", kw["embed"].title)
+        labels = [b.label for b in kw["view"].children]
+        self.assertEqual(labels, ["처음", "이동", "지하철", "여행지", "같이 여행"])
+        self.assertTrue(kw["view"].children[2].disabled)
+        b = fake_interaction()
+        run(kw["view"].children[0].callback(b))
+        self.assertIn("도움말", b.response.edit_message.await_args.kwargs["embed"].title)
+
+
 if __name__ == "__main__":
     unittest.main()

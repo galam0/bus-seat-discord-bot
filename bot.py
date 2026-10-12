@@ -13,6 +13,7 @@ from embeds import (BUS_IMAGE, SEAT_IMAGE, bus_embed, bus_image_embed, bus_subti
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
 from seatmap import render_seat_map
+import guide
 import travel
 from views import DateView, ResultView, date_label
 
@@ -264,7 +265,7 @@ async def bus_cmd(interaction: discord.Interaction, dep: str, arr: str):
     await _start(interaction, "bus", dep, arr)
 
 
-@tree.command(name="기차", description="기차 시간표와 예약 가능 여부를 확인해요")
+@tree.command(name="기차", description="기차 시간표와 요금을 확인해요")
 @app_commands.rename(dep="출발", arr="도착")
 @app_commands.describe(dep="출발 역/도시", arr="도착 역/도시")
 @app_commands.autocomplete(dep=_terminal_autocomplete("train"), arr=_terminal_autocomplete("train"))
@@ -292,6 +293,7 @@ async def mid_cmd(interaction: discord.Interaction, a: str, b: str,
 
 
 travel.register(tree, start_bus=lambda i, dep, arr: _start(i, "bus", dep, arr))
+guide.register(tree)
 
 
 async def start_health_server(port: int):
