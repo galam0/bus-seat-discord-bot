@@ -111,6 +111,17 @@ class RouletteTest(unittest.TestCase):
             seen.add(p.place)
         self.assertEqual(roulette.pick("서울", 30, None)[0], None)
 
+    def test_no_origin(self):
+        c = roulette.candidates(None, None, "바다")
+        names = {p.place for p in c}
+        self.assertIn("부산", names)
+        self.assertIn("제주", names)
+        self.assertTrue(all(p.km is None for p in c))
+        busan = next(p for p in c if p.place == "부산")
+        self.assertEqual(busan.travel_text(), "")
+        self.assertIn("비행기", next(p for p in c if p.place == "제주").travel_text())
+        self.assertEqual(len(roulette.candidates(None, None, None)), len(roulette.INFO))
+
     def test_every_place_has_info(self):
         from cities import PLACES
         self.assertEqual(set(roulette.INFO) - set(PLACES), set())
@@ -306,6 +317,19 @@ class CrowdRouletteTrainUITest(unittest.TestCase):
         none = fake_interaction()
         run(self.travel.send_roulette(none, "서울", "1시간", "바다"))
         self.assertIn("조건에 맞는 곳이 없어요", none.response.send_message.await_args.args[0])
+
+    def test_roulette_no_origin(self):
+        i = fake_interaction()
+        run(self.travel.send_roulette(i, None, "2시간", None))
+        kw = i.response.send_message.await_args.kwargs
+        self.assertEqual(kw["embed"].title, "🎲 이번 여행지는…")
+        self.assertIn("출발지를 넣어야", kw["embed"].footer)
+        self.assertIn(f"후보 {len(roulette.INFO)}곳", kw["embed"].footer)
+        bus = next(c for c in kw["view"].children if c.label == "버스")
+        self.assertTrue(bus.disabled)
+        r = fake_interaction()
+        run(kw["view"].reroll(r))
+        self.assertEqual(r.response.edit_message.await_args.kwargs["embed"].title, "🎲 이번 여행지는…")
 
     def test_train_embed_real(self):
         from embeds import train_embed

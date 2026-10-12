@@ -611,17 +611,25 @@ async def area_autocomplete(interaction: discord.Interaction, current: str):
 TIME_CHOICES = {"1시간": 60, "2시간": 120, "3시간": 180, "4시간": 240, "상관없음": None}
 
 
-def roulette_embed(origin: str, p: roulette.Pick, max_label: str, theme: str | None, n: int) -> discord.Embed:
+def roulette_embed(origin: str | None, p: roulette.Pick, max_label: str, theme: str | None, n: int) -> discord.Embed:
     tags = " ".join(f"{roulette.THEME_EMOJI[t]} {t}" for t in p.themes)
-    e = discord.Embed(title=f"🎲 {origin}에서 떠나는 여행지는…", color=0x9B59B6,
-                      description=f"## 📍 {p.place}\n{p.blurb}\n\n{tags}\n{p.travel_text()}")
-    cond = [max_label if max_label != "상관없음" else "시간 상관없음", theme or "테마 상관없음"]
-    e.set_footer(text=f"조건: {' · '.join(cond)} · 후보 {n}곳 중에서 뽑았어요 · 시간은 버스 기준 대략값")
+    title = f"🎲 {origin}에서 떠나는 여행지는…" if origin else "🎲 이번 여행지는…"
+    travel = p.travel_text()
+    e = discord.Embed(title=title, color=0x9B59B6,
+                      description=f"## 📍 {p.place}\n{p.blurb}\n\n{tags}" + (f"\n{travel}" if travel else ""))
+    if origin:
+        cond = [max_label if max_label != "상관없음" else "시간 상관없음", theme or "테마 상관없음"]
+        note = "시간은 버스 기준 대략값"
+    else:
+        cond = ["전국", theme or "테마 상관없음"]
+        note = ("시간 조건은 출발지를 넣어야 적용돼요" if max_label != "상관없음"
+                else "출발지를 넣으면 이동 시간도 알려줘요")
+    e.set_footer(text=f"조건: {' · '.join(cond)} · 후보 {n}곳 중에서 뽑았어요 · {note}")
     return e
 
 
 class RouletteView(discord.ui.View):
-    def __init__(self, origin: str, max_label: str, theme: str | None, p: roulette.Pick, seen: set[str],
+    def __init__(self, origin: str | None, max_label: str, theme: str | None, p: roulette.Pick, seen: set[str],
                  start_bus=None):
         super().__init__(timeout=1800)
         self.origin, self.max_label, self.theme, self.pick, self.seen = origin, max_label, theme, p, seen
@@ -659,15 +667,17 @@ class RouletteView(discord.ui.View):
         await interaction.response.send_modal(trips_ui.CreateTripModal(self.pick.place))
 
 
-async def send_roulette(interaction: discord.Interaction, origin: str, max_label: str = "상관없음",
+async def send_roulette(interaction: discord.Interaction, origin: str | None, max_label: str = "상관없음",
                         theme: str | None = None, seen: set[str] | None = None, edit: bool = False, start_bus=None):
-    if origin not in PLACES:
-        await interaction.response.send_message("출발 도시를 자동완성 목록에서 골라주세요.", ephemeral=True)
+    origin = (origin or "").strip() or None
+    if origin is not None and origin not in PLACES:
+        await interaction.response.send_message("출발 도시를 자동완성 목록에서 골라주세요. (비워두면 전국에서 뽑아요)",
+                                                ephemeral=True)
         return
     theme = theme if theme in roulette.THEMES else None
     max_label = max_label if max_label in TIME_CHOICES else "상관없음"
     seen = set(seen or ())
-    p, n = roulette.pick(origin, TIME_CHOICES[max_label], theme, avoid=seen)
+    p, n = roulette.pick(origin, TIME_CHOICES[max_label] if origin else None, theme, avoid=seen)
     if p is None:
         await interaction.response.send_message("조건에 맞는 곳이 없어요. 시간을 늘리거나 테마를 바꿔 보세요.", ephemeral=True)
         return
@@ -726,11 +736,11 @@ def register(tree: app_commands.CommandTree, start_bus=None):
 
     @tree.command(name="어디가지", description="조건에 맞는 여행지를 랜덤으로 골라줘요")
     @app_commands.rename(origin="출발", hours="시간", theme="테마")
-    @app_commands.describe(origin="출발 도시", hours="버스로 이만큼 안에 갈 수 있는 곳", theme="원하는 분위기")
+    @app_commands.describe(origin="출발 도시 (비워두면 전국에서 뽑아요)", hours="버스로 이만큼 안에 갈 수 있는 곳", theme="원하는 분위기")
     @app_commands.choices(hours=[app_commands.Choice(name=k, value=k) for k in TIME_CHOICES],
                           theme=[app_commands.Choice(name=t, value=t) for t in roulette.THEMES])
     @app_commands.autocomplete(origin=city_autocomplete)
-    async def roulette_cmd(interaction: discord.Interaction, origin: str, hours: str | None = None,
+    async def roulette_cmd(interaction: discord.Interaction, origin: str | None = None, hours: str | None = None,
                            theme: str | None = None):
         await send_roulette(interaction, origin, hours or "상관없음", theme)
 

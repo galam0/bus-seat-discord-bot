@@ -67,25 +67,31 @@ ISLANDS = {"제주", "서귀포"}  # 버스로 못 가는 곳
 @dataclass
 class Pick:
     place: str
-    minutes: int | None  # 버스 예상 (섬이면 None)
-    km: float
+    minutes: int | None  # 버스 예상 (섬이거나 출발지가 없으면 None)
+    km: float | None  # 출발지가 없으면 None
     themes: tuple[str, ...]
     blurb: str
 
     def travel_text(self) -> str:
+        if self.km is None:
+            return "✈️ 비행기·배로 가요" if self.place in ISLANDS else ""
         if self.minutes is None:
             return "✈️ 비행기·배로 가요"
         return f"🚌 버스로 약 {fmt_minutes(self.minutes)} ({self.km:.0f}km)"
 
 
-def candidates(origin: str, max_minutes: int | None, theme: str | None) -> list[Pick]:
-    if origin not in PLACES:
+def candidates(origin: str | None, max_minutes: int | None, theme: str | None) -> list[Pick]:
+    """origin 이 None 이면 출발지 없이 전국에서 고른다 (시간 조건은 무시)."""
+    if origin is not None and origin not in PLACES:
         raise KeyError(origin)
     out = []
     for name, (themes, blurb) in INFO.items():
         if name == origin or name not in PLACES:
             continue
         if theme and theme not in themes:
+            continue
+        if origin is None:
+            out.append(Pick(name, None, None, themes, blurb))
             continue
         km = haversine_km(PLACES[origin], PLACES[name])
         if name in ISLANDS:
@@ -102,7 +108,7 @@ def candidates(origin: str, max_minutes: int | None, theme: str | None) -> list[
     return out
 
 
-def pick(origin: str, max_minutes: int | None, theme: str | None, rng: random.Random | None = None,
+def pick(origin: str | None, max_minutes: int | None, theme: str | None, rng: random.Random | None = None,
          avoid: set[str] | None = None) -> tuple[Pick | None, int]:
     """(뽑힌 곳, 후보 수). 방금 나온 곳(avoid)은 되도록 피한다."""
     rng = rng or random.Random()
