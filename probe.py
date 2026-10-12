@@ -8,10 +8,10 @@ import aiohttp
 log = logging.getLogger("seatbot.probe")
 
 URLS = [
-    "http://openapi.seoul.go.kr:8088/sample/json/subwayStationMaster/1/3/",
-    "http://openapi.seoul.go.kr:8088/sample/json/SearchSTNBySubwayLineInfo/1/3/",
-    "http://openapi.seoul.go.kr:8088/sample/json/SearchSTNBySubwayLineInfo/1/3/%20/%20/2호선",
-    "http://swopenapi.seoul.go.kr/api/subway/sample/json/realtimeStationArrival/0/3/" + quote("서울"),
+    "http://openapi.seoul.go.kr:8088/sample/json/subwayStationMaster/1/1000/",
+    "http://openapi.seoul.go.kr:8088/sample/json/SearchSTNBySubwayLineInfo/100/105/",
+    "http://swopenapi.seoul.go.kr/api/subway/sample/json/realtimeStationArrival/1/5/" + quote("서울"),
+    "http://swopenapi.seoul.go.kr/api/subway/sample/json/realtimeStationArrival/0/5/" + quote("서울"),
 ]
 
 
