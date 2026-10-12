@@ -88,6 +88,19 @@ class NetworkTest(unittest.TestCase):
         self.assertIsNone(find_route(n, "서울", "서울"))
         self.assertIsNone(find_route(n, "서울", "없는역"))
 
+    def test_link_fixes(self):
+        from subway import apply_fixes
+        n = net()
+        self.assertIn(frozenset(("서초", "교대")), edges(n, "2호선"))
+        apply_fixes(n, {"2호선": {"remove": [("교대", "서초")], "add": [("서초", "강남")]},
+                        "없는선": {"add": [("가", "나")]}})
+        e2 = edges(n, "2호선")
+        self.assertNotIn(frozenset(("서초", "교대")), e2)
+        self.assertIn(frozenset(("서초", "강남")), e2)
+        a, b = n.by_name["서초"][0], n.by_name["교대"]
+        self.assertTrue(all(x not in n.adj[a] for x in b))
+        apply_fixes(n, {"2호선": {"remove": [("교대", "서초")]}})  # 이미 없으면 경고만
+
     def test_missing_coords_still_builds(self):
         n = build_network([], line_rows())
         self.assertIsNotNone(find_route(n, "을지로입구", "을지로4가"))

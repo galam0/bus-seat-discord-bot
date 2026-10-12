@@ -280,7 +280,48 @@ def build_network(master_rows: list[dict], line_rows: list[dict]) -> Network:
                 break
             if a.line != b.line and b.id not in adj[a.id] and _dist(a, b) <= TRANSFER_KM:
                 adj[a.id][b.id] = adj[b.id][a.id] = TRANSFER_MIN
-    return Network(nodes, adj, lines, by_name)
+    net = Network(nodes, adj, lines, by_name)
+    apply_fixes(net, LINK_FIXES)
+    return net
+
+
+# 코드 순서·거리로 추정한 연결 중 실제와 다른 곳 (2026-10 서울시 데이터로 확인)
+LINK_FIXES: dict[str, dict[str, list[tuple[str, str]]]] = {
+    # 응암 순환: 응암 -> 역촌 -> 불광 -> 독바위 -> 연신내 -> 구산 -> 응암, 응암 - 새절
+    "6호선": {"remove": [("구산", "새절")], "add": [("구산", "응암"), ("응암", "새절")]},
+    # 삼성역 구간 미개통: 운정중앙~서울역, 수서~동탄 따로 운행
+    "GTX-A": {"remove": [("서울", "수서")]},
+    "경의중앙선": {"remove": [("공덕", "이촌"), ("신촌", "서강대")],
+               "add": [("용산", "효창공원앞"), ("신촌", "가좌")]},
+    "경춘선": {"remove": [("광운대", "청량리")], "add": [("광운대", "상봉")]},
+    "공항철도": {"remove": [("디지털미디어시티", "김포공항"), ("운서", "검암")],
+             "add": [("검암", "청라국제도시")]},
+}
+
+
+def apply_fixes(net: Network, fixes) -> None:
+    for line, fx in fixes.items():
+        ids = {n.name: i for i, n in net.nodes.items() if n.line == line}
+        if not ids:
+            continue
+        edges = net.lines.setdefault(line, [])
+        for a, b in fx.get("remove", []):
+            ia, ib = ids.get(a), ids.get(b)
+            if ia is None or ib is None or ib not in net.adj[ia]:
+                log.warning("연결 보정: %s %s-%s 없음 (데이터가 바뀌었을 수 있어요)", line, a, b)
+                continue
+            del net.adj[ia][ib], net.adj[ib][ia]
+            edges[:] = [e for e in edges if set(e) != {ia, ib}]
+        for a, b in fx.get("add", []):
+            ia, ib = ids.get(a), ids.get(b)
+            if ia is None or ib is None:
+                log.warning("연결 보정: %s %s 또는 %s 역 없음", line, a, b)
+                continue
+            if ib in net.adj[ia]:
+                continue
+            w = _hop_minutes(net.nodes[ia], net.nodes[ib])
+            net.adj[ia][ib] = net.adj[ib][ia] = w
+            edges.append((ia, ib))
 
 
 def _join_components(members: list[Node], adj, link):

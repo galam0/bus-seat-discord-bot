@@ -72,6 +72,30 @@ class TravelState:
 
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         self._loading = asyncio.create_task(self.subway.load(self.session))
+        asyncio.create_task(self.self_check())
+
+    async def self_check(self):
+        """시작할 때 실시간 도착·날씨 키가 되는지 한 번 확인해서 로그에 남긴다 (키 값은 남기지 않음)."""
+        await asyncio.sleep(3)
+        for n, key in enumerate(self.realtime_keys, 1):
+            try:
+                async with self.session.get(REALTIME.format(key=key, name=quote("서울"))) as r:
+                    data = await r.json(content_type=None)
+                code = realtime_code(data)
+                log.info("확인 실시간 도착(%d번째 키): %s, %d건", n, code or "?", len(parse_arrivals(data)))
+                if code in ("INFO-000", "INFO-200"):
+                    if n > 1:
+                        self.realtime_keys.insert(0, self.realtime_keys.pop(n - 1))
+                    break
+            except Exception as e:
+                log.warning("확인 실시간 도착(%d번째 키) 실패: %r", n, e)
+        if self.kma_key:
+            try:
+                lat, lon = CITIES["서울"]
+                fc = await fetch_forecast(self.session, self.kma_key, lat, lon, datetime.now(KST))
+                log.info("확인 날씨: 정상, 예보 %d칸", len(fc.slots))
+            except Exception as e:
+                log.warning("확인 날씨 실패: %s", str(e)[:200])
 
     async def close(self):
         if self.session:
