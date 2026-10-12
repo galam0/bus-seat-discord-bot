@@ -33,7 +33,7 @@ python bot.py
 - 서울시 `subwayStationMaster`(역 좌표)와 `SearchSTNBySubwayLineInfo`(역 코드)를 시작할 때 한 번 받아요. 출처: 서울특별시 (공공누리 1유형)
 - 역 사이 연결은 공개 데이터에 없어서 외부코드 순서 + 좌표로 추정해요 (`subway.py` 맨 위 설명). 시작 로그에 노선별 연결이 찍혀요.
 - 노선도는 공식 노선도를 따라 그리지 않고 역 좌표로 직접 그려요 (실제 거리 비율).
-- 예상 시간은 역 사이 거리(평균 33km/h) + 정차 30초 + 환승 5분으로 계산한 대략값이에요.
+- 예상 시간은 역 사이 거리(평균 33km/h) + 정차 30초 + 환승 8분(걷기·기다림)으로 계산한 대략값이에요.
 
 ## Render 배포 (무료 웹 서비스)
 - Build: `pip install -r requirements.txt` / Start: `python bot.py` / Health check: `/health`

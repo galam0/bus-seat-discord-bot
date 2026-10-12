@@ -96,10 +96,11 @@ class TravelState:
             await asyncio.wait({self._loading}, timeout=30)
         if self.subway.net is not None:
             for a, b in (("강남", "홍대입구"), ("홍대입구", "강남"), ("서울", "수원"), ("용답", "강남"),
-                         ("김포공항", "서울"), ("응암", "공덕")):
+                         ("김포공항", "서울"), ("응암", "공덕"), ("잠실", "여의도"), ("노원", "강남"),
+                         ("인천", "서울"), ("판교", "광화문")):
                 r = find_route(self.subway.net, a, b)
                 if r:
-                    log.info("확인 경로 %s->%s: %s", a, b,
+                    log.info("확인 경로 %s->%s (%d분): %s", a, b, round(r.minutes),
                              " | ".join(f"{l.line} {l.stations[0]}->{l.stations[-1]} [{l.heading}]" for l in r.legs))
         if self.realtime_keys:
             data = await fetch_realtime("강남")

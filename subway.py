@@ -24,7 +24,7 @@ log = logging.getLogger("seatbot.subway")
 API = "http://openapi.seoul.go.kr:8088/{key}/json/{service}/1/1000/"
 REALTIME = "http://swopenapi.seoul.go.kr/api/subway/{key}/json/realtimeStationArrival/0/30/{name}"
 
-TRANSFER_MIN = 5.0  # 환승 한 번에 드는 시간(분)
+TRANSFER_MIN = 8.0  # 환승 한 번에 드는 시간(분): 걷기 + 기다리기
 DWELL_MIN = 0.5  # 역마다 서 있는 시간
 KMH = 33  # 역 사이 평균 속도
 MAX_LINK_KM = 12  # 코드 순서로 이을 때 이보다 멀면 의심해서 잇지 않는다

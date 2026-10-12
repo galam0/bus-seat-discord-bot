@@ -3,7 +3,7 @@ from io import BytesIO
 from math import cos, radians
 
 from images import BG, CARD, DIM, LINE, SUB, TEXT, _Canvas
-from subway import Network, Route, line_color, line_sort_key
+from subway import TRANSFER_MIN, Network, Route, line_color, line_sort_key
 
 
 def _rgb(hex_color: str):
@@ -78,7 +78,7 @@ def render_route(route: Route, src: str, dst: str) -> BytesIO:
         if kind == "transfer":
             for yy in range(int(y + 6), int(y + 42), 8):
                 c.line([(x_bar, yy), (x_bar, yy + 4)], DIM, 3)
-            c.text(x_bar + 26, y + 24, f"{data} · 약 5분", 14, SUB, anchor="lm")
+            c.text(x_bar + 26, y + 24, f"{data} · 걷기·기다림 약 {TRANSFER_MIN:.0f}분", 14, SUB, anchor="lm")
             y += 48
             continue
         if kind == "heading":
