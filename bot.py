@@ -8,11 +8,17 @@ import discord
 from discord import app_commands
 
 from cities import CITIES, place_label, resolve_place
-from embeds import bus_embed, midpoint_embed, train_embed
+from embeds import (BUS_IMAGE, SEAT_IMAGE, bus_embed, bus_image_embed, bus_subtitle,
+                    midpoint_embed, missing_text, page_range, train_embed)
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
 from seatmap import render_seat_map
 from views import DateView, ResultView, date_label
+
+try:  # Pillow 가 없으면 글자로만 보여준다
+    import images
+except Exception:  # pragma: no cover
+    images = None
 
 KST = ZoneInfo("Asia/Seoul")
 log = logging.getLogger("seatbot")
@@ -70,12 +76,14 @@ class Flow:
         await interaction.response.send_message(self._prompt(), view=self._date_view())
 
     async def back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(content=self._prompt(), embed=None, view=self._date_view())
+        await interaction.response.edit_message(
+            content=self._prompt(), embed=None, view=self._date_view(), attachments=[]
+        )
 
     async def pick(self, interaction: discord.Interaction, day: date):
         label = date_label(day, today_kst())
         await interaction.response.edit_message(
-            content=f"**{self.dep} → {self.arr}** {label} 조회 중…", embed=None, view=None
+            content=f"**{self.dep} → {self.arr}** {label} 조회 중…", embed=None, view=None, attachments=[]
         )
         try:
             result = await self.provider.search(self.q_dep, self.q_arr, day)
@@ -95,34 +103,65 @@ class Flow:
             self.sources, self.missing = result.sources, result.missing
         else:
             self.trips = drop_departed(result, day)
-        embed, view = self._render(0)
-        await interaction.edit_original_response(content=None, embed=embed, view=view)
+        embed, view, files = await self._render(0)
+        await interaction.edit_original_response(content=None, embed=embed, view=view, attachments=files)
 
-    def _render(self, page: int):
-        if self.kind == "bus":
-            view = ResultView(self.owner_id, self.back, trips=self.trips, page=page,
-                              on_page=self.turn, on_seat=self.seat)
-            embed = bus_embed(self.dep, self.arr, self.day_label, self.trips,
-                              self.sources, self.missing, view.page)
-        else:
+    async def _render(self, page: int):
+        """(embed, view, 첨부 파일들). 버스는 편 목록을 이미지로, 못 만들면 글자로."""
+        if self.kind == "train":
             view = ResultView(self.owner_id, self.back, trips=self.trips, page=page, on_page=self.turn)
             embed = train_embed(self.dep, self.arr, self.day_label, self.trips,
                                 self.provider.label, view.page)
-        return embed, view
+            return embed, view, []
+
+        view = ResultView(self.owner_id, self.back, trips=self.trips, page=page,
+                          on_page=self.turn, on_seat=self.seat)
+        page = view.page
+        if images is not None and self.trips:
+            try:
+                start, end = page_range(len(self.trips), page)
+                notice = f"※ {missing_text(self.missing)}" if self.missing else ""
+                png = await asyncio.to_thread(
+                    images.render_schedule,
+                    f"{self.dep} → {self.arr}",
+                    bus_subtitle(self.day_label, self.trips, page),
+                    self.trips[start:end],
+                    f"출처: {' + '.join(self.sources)}",
+                    notice,
+                )
+                embed = bus_image_embed(self.dep, self.arr, self.day_label, self.trips, self.missing, page)
+                return embed, view, [discord.File(png, filename=BUS_IMAGE)]
+            except Exception:
+                log.exception("편 목록 이미지 실패, 글자로 대신 보여줌")
+        embed = bus_embed(self.dep, self.arr, self.day_label, self.trips, self.sources, self.missing, page)
+        return embed, view, []
 
     async def turn(self, interaction: discord.Interaction, page: int):
-        embed, view = self._render(page)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()  # 이미지 그리는 동안 3초 제한에 안 걸리게
+        embed, view, files = await self._render(page)
+        await interaction.edit_original_response(embed=embed, view=view, attachments=files)
 
     async def seat(self, interaction: discord.Interaction, idx: int):
         t = self.trips[idx]
         route = t.route or f"{self.dep} → {self.arr}"
-        head = f"**{t.depart}→{t.arrive}  {route}**  [{t.kind}] {t.grade}"
-        if t.sold_out:
-            text = f"{head}\n🔴 매진이에요."
-        else:
-            text = f"{head}\n잔여 {t.seats_left}/{t.seats_total}석\n```\n{render_seat_map(t.seats_total, t.free_seats)}\n```"
-        await interaction.response.send_message(text, ephemeral=True)
+        title = f"{t.depart}→{t.arrive}  {route}"
+        sub = f"[{t.kind}] {t.grade} · " + ("매진" if t.sold_out else f"잔여 {t.seats_left}/{t.seats_total}석") \
+            + f" · {t.fare:,}원"
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if images is not None:
+            try:
+                png = await asyncio.to_thread(images.render_seats, title, sub, t)
+                embed = discord.Embed(title=f"🪑 {title}", description=sub)
+                embed.set_image(url=f"attachment://{SEAT_IMAGE}")
+                await interaction.followup.send(embed=embed, file=discord.File(png, filename=SEAT_IMAGE),
+                                                ephemeral=True)
+                return
+            except Exception:
+                log.exception("좌석 이미지 실패, 글자로 대신 보여줌")
+        text = f"**{title}**  {sub}"
+        if not t.sold_out:
+            text += f"\n```\n{render_seat_map(t.seats_total, t.free_seats)}\n```"
+        await interaction.followup.send(text, ephemeral=True)
 
 
 class SeatBot(discord.Client):

@@ -8,7 +8,7 @@ WEEK = "월화수목금토일"
 _PREFIX = {0: "오늘", 1: "내일", 2: "모레"}
 
 
-def date_options(today: date, n: int = 7) -> list[date]:
+def date_options(today: date, n: int = 15) -> list[date]:
     return [today + timedelta(days=i) for i in range(n)]
 
 
@@ -43,12 +43,13 @@ def _button(label, callback, *, emoji=None, disabled=False, row=None, primary=Fa
 
 
 class DateView(_OwnerOnly):
-    """날짜 버튼 (오늘부터 7일)."""
+    """날짜 버튼 (오늘부터 2주 뒤까지 15일, 5개씩 3줄)."""
 
     def __init__(self, owner_id: int, on_pick, today: date, timeout: float = 180):
         super().__init__(owner_id, timeout)
-        for d in date_options(today):
-            self.add_item(_button(date_label(d, today), self._make_callback(on_pick, d), primary=d == today))
+        for i, d in enumerate(date_options(today)):
+            self.add_item(_button(date_label(d, today), self._make_callback(on_pick, d),
+                                  primary=d == today, row=i // 5))
 
     @staticmethod
     def _make_callback(on_pick, d: date):

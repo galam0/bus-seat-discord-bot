@@ -3,7 +3,7 @@ import discord
 from midpoint import Candidate, fmt_minutes
 from models import BusTrip, TrainTrip
 
-PAGE_SIZE = 15  # 한 화면에 보여줄 편 수 (자리 보기 메뉴 25개 한도보다 작게)
+PAGE_SIZE = 10  # 한 화면(이미지 한 장)에 보여줄 편 수
 MEDALS = ("🥇", "🥈", "🥉")
 
 
@@ -30,8 +30,43 @@ def _bus_seat_text(t: BusTrip) -> str:
     return f"{dot} {t.seats_left}/{t.seats_total}석"
 
 
+def bus_subtitle(day_label: str, trips: list[BusTrip], page: int) -> str:
+    counts = " · ".join(
+        f"{k} {n}편" for k in ("고속", "시외") if (n := sum(t.kind == k for t in trips))
+    )
+    parts = [day_label] + ([counts] if counts else [])
+    pages = page_count(len(trips))
+    if pages > 1:
+        parts.append(f"{min(max(page, 0), pages - 1) + 1}/{pages}쪽")
+    return " · ".join(parts)
+
+
+def missing_text(missing: list[str] | None) -> str:
+    return f"{', '.join(missing)} 조회 실패 — 일부 노선이 빠졌을 수 있어요" if missing else ""
+
+
+BUS_IMAGE = "buses.png"
+SEAT_IMAGE = "seats.png"
+
+
+def bus_image_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
+                    missing: list[str] | None, page: int) -> discord.Embed:
+    """편 목록 이미지를 붙이는 embed (글자는 머리말만)."""
+    desc = f"**{bus_subtitle(day_label, trips, page)}**"
+    if missing:
+        desc += f"\n⚠️ {missing_text(missing)}"
+    if trips:
+        desc += "\n🪑 아래 메뉴에서 시간을 고르면 자리 배치도가 나와요"
+    e = discord.Embed(title=f"🚌 {dep} → {arr}", description=desc)
+    if trips:
+        e.set_image(url=f"attachment://{BUS_IMAGE}")
+    e.set_footer(text="터미널 하나만 보려면 출발/도착에 터미널 이름을 넣어보세요 (예: 동서울)")
+    return e
+
+
 def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
               sources: list[str], missing: list[str] | None = None, page: int = 0) -> discord.Embed:
+    """글자로만 된 편 목록 (이미지를 못 만들 때 대신 씀)."""
     start, end = page_range(len(trips), page)
     lines = [
         f"`{t.depart}→{t.arrive}` " + (f"**{t.route}** " if t.route else "")

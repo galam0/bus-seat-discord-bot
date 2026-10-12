@@ -54,7 +54,9 @@ def fake_interaction(user_id=1):
     i.user.id = user_id
     i.response.send_message = AsyncMock()
     i.response.edit_message = AsyncMock()
+    i.response.defer = AsyncMock()
     i.edit_original_response = AsyncMock()
+    i.followup.send = AsyncMock()
     return i
 
 
@@ -83,17 +85,63 @@ class MidpointTest(unittest.TestCase):
 
 
 class SeatMapTest(unittest.TestCase):
-    def test_premium_layout(self):
+    def test_rows_cover_every_seat_once(self):
+        from seatmap import seat_rows
+        for total in (28, 45, 41, 21, 31):
+            nums = [n for row in seat_rows(total) for _, n in row]
+            self.assertEqual(nums, list(range(1, total + 1)), total)
+
+    def test_real_bus_shapes(self):
+        from seatmap import AISLE, seat_rows
+        r28 = seat_rows(28)  # 우등: 2+1 x 8줄 + 마지막 4석
+        self.assertEqual(len(r28), 9)
+        self.assertEqual([c for c, _ in r28[0]], [0, 1, 3])
+        self.assertEqual(len(r28[-1]), 4)
+        self.assertIn(AISLE, [c for c, _ in r28[-1]])
+        r45 = seat_rows(45)  # 일반: 2+2 x 10줄 + 마지막 5석
+        self.assertEqual(len(r45), 11)
+        self.assertEqual(len(r45[-1]), 5)
+
+    def test_text_fallback(self):
         s = render_seat_map(28, {1, 3})
         self.assertIn("01", s)
         self.assertIn("03", s)
         self.assertNotIn("02", s.split("\n")[1])  # 02는 찬 자리
-        # 28석 = 3석짜리 줄 9개(통로 표시 있음) + 마지막 1석 줄
-        self.assertEqual(sum(1 for l in s.split("\n") if "|" in l), 9)
+        self.assertEqual(render_seat_map(45, set(range(1, 46))).split("\n")[1], "01 02 | 03 04")
 
-    def test_standard_layout_rows_of_four(self):
-        s = render_seat_map(45, set(range(1, 46)))
-        self.assertIn("01 02  |  03 04", s)
+
+class ImageTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            import images  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("Pillow 미설치")
+
+    def test_schedule_and_seats_png(self):
+        import images
+        from PIL import Image
+        trips = run(MockBusProvider().search("부산", "서울", TODAY)).trips
+        for page in (trips[:10], trips[:1], []):
+            png = images.render_schedule("부산 → 서울", "오늘", page, "출처", "※ 일부 실패")
+            img = Image.open(png)
+            self.assertEqual(img.format, "PNG")
+            self.assertGreater(img.width, img.height * 0.9 if len(page) == 10 else 0)
+        for total in (28, 45):
+            t = next(t for t in trips if t.seats_total == total)
+            img = Image.open(images.render_seats("제목", "부제", t))
+            self.assertGreater(img.width, img.height)  # 가로로 눕힌 버스
+
+    def test_fonts_have_hangul_and_symbols(self):
+        import images
+        from fontTools.ttLib import TTFont
+        cmap = TTFont(images.FONT_DIR / "NotoSansKR-Bold-subset.otf").getBestCmap()
+        for ch in "진주고속서울경부→·※석원쪽":
+            self.assertIn(ord(ch), cmap, ch)
+
+    def test_duration(self):
+        import images
+        self.assertEqual(images.duration_text("23:30", "01:10"), "1시간 40분")
+        self.assertEqual(images.duration_text("06:00", "06:45"), "45분")
 
 
 class ProviderTest(unittest.TestCase):
@@ -164,7 +212,9 @@ class ViewTest(unittest.TestCase):
                 picked.append(d)
 
             v = DateView(1, on_pick, TODAY)
-            self.assertEqual(len(v.children), 7)
+            self.assertEqual(len(v.children), 15)  # 오늘 ~ 2주 뒤
+            self.assertEqual([c.row for c in v.children], [i // 5 for i in range(15)])
+            self.assertIn("10/26", v.children[14].label)
             await v.children[2].callback(fake_interaction())
             self.assertEqual(picked, [date(2026, 10, 14)])
             stranger = fake_interaction(user_id=2)
@@ -283,9 +333,11 @@ class FlowTest(unittest.TestCase):
             idx = next(n for n, t in enumerate(flow.trips) if not t.sold_out)
             s = fake_interaction()
             await flow.seat(s, idx)
-            text = s.response.send_message.await_args.args[0]
-            self.assertIn("```", text)
-            self.assertTrue(s.response.send_message.await_args.kwargs["ephemeral"])
+            s.response.defer.assert_awaited_once()
+            kw = s.followup.send.await_args.kwargs
+            self.assertTrue(kw["ephemeral"])
+            self.assertEqual(kw["file"].filename, "seats.png")
+            self.assertIn(flow.trips[idx].depart, kw["embed"].title)
 
         run(go())
 
@@ -306,14 +358,16 @@ class FlowTest(unittest.TestCase):
             await flow.pick(fake_interaction(), date(2026, 10, 20))
             t = fake_interaction()
             await flow.turn(t, 1)
-            kwargs = t.response.edit_message.await_args.kwargs
+            t.response.defer.assert_awaited_once()
+            kwargs = t.edit_original_response.await_args.kwargs
+            self.assertEqual(kwargs["attachments"][0].filename, "buses.png")
             self.assertIn("2/", kwargs["embed"].description)
             select = kwargs["view"].children[0]
             idx = int(select.options[0].value)
             self.assertEqual(idx, PAGE_SIZE)
             s = fake_interaction()
             await flow.seat(s, idx)
-            self.assertIn(flow.trips[idx].depart, s.response.send_message.await_args.args[0])
+            self.assertIn(flow.trips[idx].depart, s.followup.send.await_args.kwargs["embed"].title)
 
         run(go())
 
@@ -400,7 +454,36 @@ class TerminalFlowTest(unittest.TestCase):
             idx = next(n for n, t in enumerate(flow.trips) if not t.sold_out)
             s = fake_interaction()
             await flow.seat(s, idx)
-            self.assertIn(flow.trips[idx].route, s.response.send_message.await_args.args[0])
+            self.assertIn(flow.trips[idx].route, s.followup.send.await_args.kwargs["embed"].title)
+
+        run(go())
+
+    def test_text_fallback_without_pillow(self):
+        async def go():
+            saved = bot.images
+            bot.images = None
+            try:
+                flow = Flow("bus", MockBusProvider(), "진주", "서울", 1)
+                i = fake_interaction()
+                await flow.pick(i, date(2026, 10, 20))
+                kw = i.edit_original_response.await_args.kwargs
+                self.assertEqual(kw["attachments"], [])
+                self.assertIn("진주", kw["embed"].description)  # 글자 목록
+                idx = next(n for n, t in enumerate(flow.trips) if not t.sold_out)
+                s = fake_interaction()
+                await flow.seat(s, idx)
+                self.assertIn("```", s.followup.send.await_args.args[0])
+            finally:
+                bot.images = saved
+
+        run(go())
+
+    def test_back_clears_image(self):
+        async def go():
+            flow = Flow("bus", MockBusProvider(), "진주", "서울", 1)
+            i = fake_interaction()
+            await flow.back(i)
+            self.assertEqual(i.response.edit_message.await_args.kwargs["attachments"], [])
 
         run(go())
 
