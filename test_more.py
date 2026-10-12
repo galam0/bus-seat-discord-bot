@@ -622,6 +622,119 @@ class CardRenderTest(unittest.TestCase):
             self.assertTrue(p.read().startswith(b"\x89PNG"))
 
 
+def _rt(*rows):
+    keys = ("subwayId", "updnLine", "trainLineNm", "barvlDt", "arvlMsg2", "arvlMsg3", "arvlCd", "btrainNo")
+    return {"errorMessage": {"code": "INFO-000"}, "realtimeArrivalList": [dict(zip(keys, r)) for r in rows]}
+
+
+class ArrivalAlertTest(unittest.TestCase):
+    def setUp(self):
+        import travel
+        self.t = travel
+        self.saved = (list(travel.state.realtime_keys), travel.state.client)
+        travel.state.realtime_keys = ["k"]
+        travel._rt_cache.clear()
+        travel._watches.clear()
+
+    def tearDown(self):
+        for w in list(self.t._watches.values()):
+            if w.task:
+                w.task.cancel()
+        self.t._watches.clear()
+        self.t.state.realtime_keys, self.t.state.client = self.saved
+
+    def test_eta(self):
+        from subway import parse_arrivals
+        a = parse_arrivals(_rt(
+            ("1002", "내선", "성수행 - 교대방면", "190", "3분 후", "역삼", "99", "2001"),
+            ("1002", "내선", "성수행 - 교대방면", "0", "전역 도착", "역삼", "5", "2003"),
+            ("1002", "외선", "성수행 - 역삼방면", "0", "강남 출발", "강남", "2", "2005"),
+            ("1002", "외선", "성수행 - 역삼방면", "0", "[3]번째 전역 (서초)", "서초", "99", "2007"),
+            ("1002", "외선", "성수행 - 역삼방면", "0", "강남 진입", "강남", "0", "2009"),
+            ("1002", "외선", "성수행 - 역삼방면", "0", "운행 중", "", "99", "2011"),
+        ))
+        etas = {x.train_no: x.eta() for x in a}
+        self.assertEqual(etas, {"2001": 190, "2003": 120, "2005": -1, "2007": 360, "2009": 0, "2011": None})
+
+    def test_setup_pick_and_fire(self):
+        t = self.t
+        first = _rt(("1002", "내선", "성수행 - 교대방면", "100", "2분 후", "역삼", "99", "A1"),
+                    ("1002", "내선", "성수행 - 교대방면", "600", "10분 후", "선릉", "99", "A2"),
+                    ("1002", "외선", "성수행 - 역삼방면", "300", "5분 후", "서초", "99", "B1"))
+        later = _rt(("1002", "내선", "성수행 - 교대방면", "150", "2분 후", "역삼", "99", "A2"))
+        responses = [first, first, later]
+        fake = AsyncMock(side_effect=lambda st: responses.pop(0) if responses else later)
+        user = MagicMock()
+        user.send = AsyncMock()
+        client = MagicMock()
+        client.get_user = MagicMock(return_value=user)
+        t.state.client = client
+
+        async def go():
+            with patch.object(t, "fetch_realtime", fake), patch.object(t, "ALERT_POLL", 0.01):
+                i = fake_interaction()
+                await t.send_alert_setup(i, "강남", 3)
+                view = i.followup.send.await_args.kwargs["view"]
+                self.assertEqual([o.label for o in view.sel.options],
+                                 ["2호선 · 교대 방면 (내선)", "2호선 · 역삼 방면 (외선)"])
+                p = fake_interaction(user_id=42)
+                p.channel_id = 9
+                view.sel.values = ["2호선|내선"]
+                await view.picked(p)
+                msg = p.response.edit_message.await_args.kwargs["content"]
+                self.assertIn("3분 안", msg)
+                self.assertIn("그 다음 열차", msg)  # A1 은 이미 2분 거리라 건너뜀
+                w = t._watches[42]
+                self.assertEqual(w.skip, {"A1"})
+                await asyncio.wait_for(w.task, 2)
+            self.assertNotIn(42, t._watches)
+            text = user.send.await_args.args[0]
+            self.assertIn("강남역", text)
+            self.assertIn("성수행", text)
+            self.assertIn("약 2분 뒤", text)
+
+        run(go())
+
+    def test_dm_blocked_goes_to_channel(self):
+        t = self.t
+        user = MagicMock()
+        user.send = AsyncMock(side_effect=Exception("Cannot send messages to this user"))
+        ch = MagicMock()
+        ch.send = AsyncMock()
+        client = MagicMock()
+        client.get_user = MagicMock(return_value=user)
+        client.get_channel = MagicMock(return_value=ch)
+        t.state.client = client
+        from datetime import datetime
+        w = t.Watch(7, 5, "강남", "2호선|내선", "2호선", 3, datetime.now(t.KST), set())
+        run(t._notify(w, "곧 와요"))
+        self.assertEqual(ch.send.await_args.args[0], "<@7> 곧 와요")
+
+    def test_cancel(self):
+        t = self.t
+        from datetime import datetime
+
+        async def go():
+            w = t.Watch(5, None, "강남", "k", "2호선", 3, datetime.now(t.KST), set())
+            w.task = asyncio.create_task(asyncio.sleep(10))
+            t._watches[5] = w
+            view = t.AlertCancelView(5)
+            i = fake_interaction()
+            await view.cancel(i, None)
+            self.assertIn("껐어요", i.response.edit_message.await_args.kwargs["content"])
+            self.assertNotIn(5, t._watches)
+            await asyncio.sleep(0)
+            self.assertTrue(w.task.cancelled())
+
+        run(go())
+
+    def test_no_arrivals(self):
+        with patch.object(self.t, "fetch_realtime", AsyncMock(return_value=_rt())):
+            i = fake_interaction()
+            run(self.t.send_alert_setup(i, "소요산"))
+        self.assertIn("도착 정보가 없어요", i.followup.send.await_args.args[0])
+
+
 class GuideTest(unittest.TestCase):
     def test_home_and_sections(self):
         import guide

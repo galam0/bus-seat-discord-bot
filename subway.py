@@ -578,6 +578,26 @@ class Arrival:
     express: bool
     when: str = ""  # '3분 후' / '전역 도착' (전광판용 짧은 글자)
     where: str = ""  # 지금 열차가 있는 역
+    code: str = ""  # arvlCd: 0 진입, 1 도착, 2 출발, 3 전역출발, 4 전역진입, 5 전역도착, 99 운행중
+    train_no: str = ""
+
+    def eta(self) -> int | None:
+        """이 역까지 대략 몇 초 남았는지. 모르면 None, 이미 떠났으면 -1."""
+        if self.seconds > 0:
+            return self.seconds
+        if self.code == "2":
+            return -1
+        if self.code in ("0", "1"):
+            return 0
+        if self.code in ("3", "4", "5"):
+            return {"3": 90, "4": 100, "5": 120}[self.code]
+        m = re.search(r"\[(\d+)\]번째 전역", self.message)
+        if m:
+            return int(m.group(1)) * 120
+        m = re.search(r"(\d+)분", self.message)
+        if m:
+            return int(m.group(1)) * 60
+        return None
 
 
 def realtime_code(data: dict) -> str:
@@ -603,6 +623,7 @@ def parse_arrivals(data: dict) -> list[Arrival]:
             if where:
                 msg += f" ({where})"
         out.append(Arrival(line, str(r.get("updnLine") or ""), str(r.get("trainLineNm") or ""),
-                           msg, secs, str(r.get("btrainSttus") or "") in ("급행", "ITX", "특급"), when, where))
+                           msg, secs, str(r.get("btrainSttus") or "") in ("급행", "ITX", "특급"), when, where,
+                           str(r.get("arvlCd") or ""), str(r.get("btrainNo") or "")))
     out.sort(key=lambda a: (line_sort_key(a.line), a.direction, a.seconds))
     return out

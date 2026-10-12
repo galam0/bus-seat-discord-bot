@@ -192,6 +192,7 @@ class SeatBot(discord.Client):
         self.train = None
 
     async def setup_hook(self):
+        travel.state.client = self
         await travel.state.start()  # 지하철 데이터는 뒤에서 불러온다
         self.loop.create_task(travel.trips_ui.reminder_loop(self))
         self.loop.create_task(self._preload_train())

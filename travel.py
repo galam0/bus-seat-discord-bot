@@ -74,6 +74,7 @@ def match_names(names, current: str, limit: int = 25) -> list[str]:
 class TravelState:
     def __init__(self):
         self.session = None
+        self.client = None  # 알림 DM 보낼 때 (bot 에서 넣어 줌)
         # 두 서울시 키를 어느 칸에 넣어도 되게: 되는 키를 찾아 쓴다
         general, metro = os.getenv("SEOUL_API_KEY"), os.getenv("SEOUL_SUBWAY_KEY")
         self.subway = SubwayData([general, metro])
@@ -381,7 +382,8 @@ async def send_arrivals(interaction: discord.Interaction, station: str, ephemera
         e = discord.Embed(title=f"⏱️ {station}역 실시간 도착", color=_color_int(line_color(arrivals[0].line)))
         e.set_image(url="attachment://arrivals.png")
         e.set_footer(text="서울시 실시간 도착정보 · 실제와 1~2분 차이가 날 수 있어요")
-        await interaction.followup.send(embed=e, file=discord.File(png, filename="arrivals.png"), ephemeral=ephemeral)
+        await interaction.followup.send(embed=e, file=discord.File(png, filename="arrivals.png"), ephemeral=ephemeral,
+                                        view=ArrivalBoardView(station))
         return
     except Exception:
         log.exception("도착 전광판 이미지 실패")
@@ -401,6 +403,211 @@ async def send_arrivals(interaction: discord.Interaction, station: str, ephemera
         embed.add_field(name=line, value="\n".join(rows)[:1024] or "-", inline=False)
     embed.set_footer(text="서울시 실시간 도착정보 · 실제와 1~2분 차이가 날 수 있어요")
     await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+
+
+# ---------------------------------------------------------------- 도착 알림
+
+class ArrivalBoardView(discord.ui.View):
+    def __init__(self, station: str):
+        super().__init__(timeout=600)
+        self.station = station
+
+    @discord.ui.button(label="도착 알림 걸기", emoji="⏰", style=discord.ButtonStyle.primary)
+    async def alert(self, interaction: discord.Interaction, _button):
+        await send_alert_setup(interaction, self.station)
+
+    @discord.ui.button(label="새로고침", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, _button):
+        await send_arrivals(interaction, self.station, ephemeral=True)
+
+
+ALERT_POLL = 20  # 초마다 확인
+ALERT_MAX = timedelta(minutes=30)  # 이만큼 지나면 알림 끝
+ALERT_MINUTES = [1, 2, 3, 5, 7]
+_rt_cache: dict[str, tuple[datetime, dict]] = {}
+
+
+async def fetch_realtime_cached(station: str, max_age: int = 15) -> dict | None:
+    """같은 역을 여러 명이 보고 있어도 15초에 한 번만 부른다."""
+    now = datetime.now(KST)
+    hit = _rt_cache.get(station)
+    if hit and (now - hit[0]).total_seconds() < max_age:
+        return hit[1]
+    data = await fetch_realtime(station)
+    if data is not None:
+        if len(_rt_cache) > 100:
+            _rt_cache.clear()
+        _rt_cache[station] = (now, data)
+    return data
+
+
+def _group_key(a) -> str:
+    return f"{a.line}|{a.direction}"
+
+
+def _group_label(items) -> str:
+    a = items[0]
+    _dest, _, way = a.heading.partition(" - ")
+    way = way.replace("방면", " 방면").strip()
+    return f"{a.line} · {way or a.heading}" + (f" ({a.direction})" if a.direction else "")
+
+
+@dataclass
+class Watch:
+    user: int
+    channel: int | None
+    station: str
+    key: str  # '노선|방향'
+    label: str
+    minutes: int
+    started: datetime
+    skip: set  # 걸 때 이미 가까이 있던 열차 번호
+    task: asyncio.Task | None = None
+
+
+_watches: dict[int, Watch] = {}  # 사용자당 하나
+
+
+def _due(arrivals, w: Watch):
+    """알려줄 열차 (노선·방향이 맞고, 걸 때 이미 가까웠던 열차가 아니고, 남은 시간이 기준 이하)."""
+    for a in arrivals:
+        if _group_key(a) != w.key or (a.train_no and a.train_no in w.skip):
+            continue
+        eta = a.eta()
+        if eta is None or eta < 0:
+            continue
+        if eta <= w.minutes * 60:
+            return a, eta
+    return None
+
+
+async def _notify(w: Watch, text: str):
+    client = state.client
+    if client is None:
+        return
+    try:
+        user = client.get_user(w.user) or await client.fetch_user(w.user)
+        await user.send(text)
+        return
+    except Exception as e:
+        log.info("도착 알림 DM 실패 (%s), 채널로 보냄", str(e)[:80])
+    try:
+        ch = client.get_channel(w.channel) if w.channel else None
+        if ch is not None:
+            await ch.send(f"<@{w.user}> {text}")
+    except Exception:
+        log.exception("도착 알림 채널 전송 실패")
+
+
+async def _watch_loop(w: Watch):
+    try:
+        while datetime.now(KST) - w.started < ALERT_MAX:
+            data = await fetch_realtime_cached(w.station, max_age=max(0, ALERT_POLL - 5))
+            hit = _due(parse_arrivals(data), w) if data else None
+            if hit:
+                a, eta = hit
+                when = "곧 들어와요" if eta <= 30 else f"약 {max(1, round(eta / 60))}분 뒤 도착해요"
+                dest = a.heading.partition(" - ")[0] or a.heading
+                where = f" (지금 {a.where})" if a.where and a.seconds > 0 else ""
+                await _notify(w, f"🚇 **{w.station}역** {w.label}\n**{dest}** 열차가 {when}{where}. 지금 출발하세요!")
+                return
+            await asyncio.sleep(ALERT_POLL)
+        await _notify(w, f"⏰ **{w.station}역** {w.label} 도착 알림이 {int(ALERT_MAX.total_seconds() // 60)}분이 지나서 꺼졌어요.")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("도착 알림 오류")
+    finally:
+        if _watches.get(w.user) is w:
+            del _watches[w.user]
+
+
+def cancel_watch(user: int) -> Watch | None:
+    w = _watches.pop(user, None)
+    if w and w.task:
+        w.task.cancel()
+    return w
+
+
+class AlertCancelView(discord.ui.View):
+    def __init__(self, user: int):
+        super().__init__(timeout=int(ALERT_MAX.total_seconds()))
+        self.user = user
+
+    @discord.ui.button(label="알림 끄기", emoji="🔕", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, _button):
+        w = cancel_watch(self.user)
+        await interaction.response.edit_message(
+            content=f"🔕 {w.station}역 도착 알림을 껐어요." if w else "이미 꺼진 알림이에요.", view=None)
+
+
+class AlertSetupView(discord.ui.View):
+    """방향(노선·상하행) 고르기 + 몇 분 전에 알릴지."""
+
+    def __init__(self, station: str, groups: list[tuple[str, str]], minutes: int):
+        super().__init__(timeout=300)
+        self.station, self.minutes, self.labels = station, minutes, dict(groups)
+        sel = discord.ui.Select(placeholder="어느 방향 열차를 탈까요?",
+                                options=[discord.SelectOption(label=label[:100], value=key)
+                                         for key, label in groups[:25]])
+        sel.callback = self.picked
+        self.sel = sel
+        self.add_item(sel)
+        msel = discord.ui.Select(placeholder=f"{minutes}분 전에 알려줘요 (바꾸려면 고르기)",
+                                 options=[discord.SelectOption(label=f"{m}분 전", value=str(m), default=m == minutes)
+                                          for m in ALERT_MINUTES])
+        msel.callback = self.minutes_picked
+        self.msel = msel
+        self.add_item(msel)
+
+    async def minutes_picked(self, interaction: discord.Interaction):
+        self.minutes = int(self.msel.values[0])
+        await interaction.response.defer()
+
+    async def picked(self, interaction: discord.Interaction):
+        key = self.sel.values[0]
+        label = self.labels.get(key, key)
+        data = await fetch_realtime_cached(self.station, max_age=5)
+        arrivals = parse_arrivals(data) if data else []
+        # 지금 이미 기준 안에 들어온 열차는 건너뛰고 그 다음 열차를 알림
+        near = [a for a in arrivals if _group_key(a) == key and (e := a.eta()) is not None
+                and 0 <= e <= self.minutes * 60]
+        skip = {a.train_no for a in near if a.train_no}
+        cancel_watch(interaction.user.id)
+        w = Watch(interaction.user.id, interaction.channel_id, self.station, key, label, self.minutes,
+                  datetime.now(KST), skip)
+        w.task = asyncio.create_task(_watch_loop(w))
+        _watches[w.user] = w
+        lines = [f"⏰ **{self.station}역 {label}**",
+                 f"열차가 **{self.minutes}분 안**으로 들어오면 DM으로 알려줄게요. (최대 {int(ALERT_MAX.total_seconds() // 60)}분)"]
+        if near:
+            a = near[0]
+            dest = a.heading.partition(" - ")[0] or a.heading
+            lines.append(f"지금 {a.when or a.message} 오는 {dest} 열차는 너무 가까워서 그 다음 열차로 알려줘요.")
+        lines.append("DM을 막아뒀으면 이 채널에서 멘션으로 알려줘요.")
+        await interaction.response.edit_message(content="\n".join(lines), view=AlertCancelView(w.user))
+
+
+async def send_alert_setup(interaction: discord.Interaction, station: str, minutes: int = 3):
+    if not state.realtime_keys:
+        await interaction.response.send_message("⚠️ 실시간 지하철 키(SEOUL_SUBWAY_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    minutes = minutes if minutes in ALERT_MINUTES else 3
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    data = await fetch_realtime_cached(station, max_age=5)
+    arrivals = parse_arrivals(data) if data else []
+    if not arrivals:
+        await interaction.followup.send(
+            f"**{station}** 도착 정보가 없어요. 서울 밖 역이나 운행이 끝난 시간에는 알림을 걸 수 없어요.", ephemeral=True)
+        return
+    groups: dict[str, list] = {}
+    for a in arrivals:
+        groups.setdefault(_group_key(a), []).append(a)
+    opts = [(k, _group_label(v)) for k, v in groups.items()]
+    w = _watches.get(interaction.user.id)
+    note = f"\n(지금 걸린 {w.station}역 알림은 새로 고르면 바뀌어요)" if w else ""
+    await interaction.followup.send(f"🚇 **{station}역** 어느 방향 열차를 알려줄까요?{note}",
+                                    view=AlertSetupView(station, opts, minutes), ephemeral=True)
 
 
 # ---------------------------------------------------------------- 날씨
@@ -1236,6 +1443,14 @@ def register(tree: app_commands.CommandTree, start_bus=None):
     @app_commands.autocomplete(place=point_autocomplete)
     async def food_cmd(interaction: discord.Interaction, place: str):
         await send_food(interaction, place)
+
+    @tree.command(name="도착알림", description="탈 열차가 몇 분 안으로 오면 DM으로 알려줘요 (서울 시내 역)")
+    @app_commands.rename(station="역", minutes="몇분전")
+    @app_commands.describe(station="타는 역", minutes="열차가 이만큼 남았을 때 알려줘요 (기본 3분)")
+    @app_commands.choices(minutes=[app_commands.Choice(name=f"{m}분 전", value=m) for m in ALERT_MINUTES])
+    @app_commands.autocomplete(station=station_autocomplete)
+    async def alert_cmd(interaction: discord.Interaction, station: str, minutes: int | None = None):
+        await send_alert_setup(interaction, station, minutes or 3)
 
     @tree.command(name="주말날씨", description="여러 도시의 이번 주말 날씨를 한 장으로 비교해요")
     @app_commands.rename(a="도시1", b="도시2", c="도시3", d="도시4", e="도시5")
