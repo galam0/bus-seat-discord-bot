@@ -636,6 +636,25 @@ class GuideTest(unittest.TestCase):
                 self.assertIn("예) `/", value)
         self.assertIn("도움말", guide.help_embed("없는 분류").title)
 
+    def test_images(self):
+        import guide
+        for key in [None, *guide.SECTIONS]:
+            self.assertTrue(guide.help_png(key).startswith(b"\x89PNG"))
+        # 처음 화면 짧은 설명이 모든 명령어에 있음
+        for _, _, cmds in guide.SECTIONS.values():
+            for c, _, _ in cmds:
+                key = c if c.startswith("/여행") else c.split(" ")[0]
+                self.assertIn(key, guide.SHORT)
+        import cards
+        self.assertEqual(cards.clean("여행 카드의 🗓️ 버튼 `/여행`"), "여행 카드의 버튼 /여행")
+
+    def test_text_fallback(self):
+        import guide
+        with patch.object(guide, "help_png", side_effect=OSError):
+            embed, files = guide.help_message("이동")
+        self.assertEqual(files, [])
+        self.assertIn("이동", embed.title)
+
     def test_buttons_switch(self):
         import guide
         i = fake_interaction()
@@ -643,12 +662,15 @@ class GuideTest(unittest.TestCase):
         kw = i.response.send_message.await_args.kwargs
         self.assertTrue(kw["ephemeral"])
         self.assertIn("지하철", kw["embed"].title)
+        self.assertEqual(kw["files"][0].filename, "help.png")
         labels = [b.label for b in kw["view"].children]
         self.assertEqual(labels, ["처음", "이동", "지하철", "여행지", "같이 여행"])
         self.assertTrue(kw["view"].children[2].disabled)
         b = fake_interaction()
         run(kw["view"].children[0].callback(b))
-        self.assertIn("도움말", b.response.edit_message.await_args.kwargs["embed"].title)
+        ekw = b.response.edit_message.await_args.kwargs
+        self.assertIn("도움말", ekw["embed"].title)
+        self.assertEqual(ekw["attachments"][0].filename, "help.png")
 
 
 if __name__ == "__main__":

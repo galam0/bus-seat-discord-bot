@@ -390,3 +390,111 @@ def render_weekend(title: str, day_labels: list[str], rows, best: str | None, no
         y += row_h + 6
     c.text(PAD + 6, h - PAD - 4, note, 12, DIM, anchor="lb")
     return c.png()
+
+
+# ---------------------------------------------------------------- 도움말
+
+def _is_emoji(ch: str) -> bool:
+    o = ord(ch)
+    return o >= 0x1F000 or 0x2600 <= o <= 0x27BF or 0xFE00 <= o <= 0xFE0F or o == 0x200D or 0x2B00 <= o <= 0x2BFF
+
+
+def clean(s: str) -> str:
+    """이모지(글꼴에 없음)와 ` 를 빼고 공백 정리."""
+    return " ".join("".join(ch for ch in s.replace("`", "") if not _is_emoji(ch)).split())
+
+
+def _cmd_parts(cmd: str) -> tuple[str, str]:
+    """'/버스 출발 도착' -> ('/버스', '출발 도착'), '/여행 일정추가 · 일정삭제' 는 통째로."""
+    if cmd.startswith("/여행"):
+        return cmd, ""
+    head, _, rest = cmd.partition(" ")
+    return head, rest
+
+
+def render_help_home(sections: list[tuple[str, str, tuple[int, int, int], list[tuple[str, str]]]],
+                     tips: list[tuple[str, list[str]]]):
+    """sections: [(이름, 소개, 색, [(명령어, 짧은 설명)])], tips: [(상황, [명령어들])]."""
+    col_w = (W - 2 * PAD - 12) / 2
+    item_h = 30
+
+    def card_h(items):
+        return 62 + len(items) * item_h + 10
+
+    pairs = [sections[i:i + 2] for i in range(0, len(sections), 2)]
+    grid_h = sum(max(card_h(s[3]) for s in pair) + 12 for pair in pairs)
+    tips_h = 44 + len(tips) * 34 + 8
+    h = PAD + 70 + tips_h + 14 + grid_h + 22 + PAD
+    c = _Canvas(W, h)
+    c.text(PAD + 6, PAD + 2, "travel 봇 도움말", 26, bold=True)
+    c.text(PAD + 6, PAD + 42, "아래 버튼으로 분류를 고르면 명령어마다 설명과 예시가 나와요", 14, SUB)
+
+    # ---- 이렇게 써보세요
+    y = PAD + 76
+    c.rect(PAD, y, W - PAD, y + tips_h, CARD, r=14)
+    c.text(PAD + 18, y + 14, "이렇게 써보세요", 14, DIM, bold=True)
+    ty = y + 46
+    for situation, cmds in tips:
+        c.text(PAD + 22, ty + 12, situation, 15, TEXT, anchor="lm")
+        x = PAD + 22 + c.text_w(situation, 15) + 10
+        c.text(x, ty + 12, "→", 15, DIM, anchor="lm")
+        x += 24
+        for cmd in cmds:
+            w = c.text_w(cmd, 14, True) + 20
+            c.rect(x, ty, x + w, ty + 25, (58, 62, 74), r=7)
+            c.text(x + w / 2, ty + 12.5, cmd, 14, (210, 225, 255), bold=True, anchor="mm")
+            x += w + 6
+        ty += 34
+    y += tips_h + 14
+
+    # ---- 분류 카드 2열
+    for pair in pairs:
+        ph = max(card_h(s[3]) for s in pair)
+        for k, (name, intro, color, items) in enumerate(pair):
+            x0 = PAD + k * (col_w + 12)
+            c.rect(x0, y, x0 + col_w, y + ph, color, r=14)
+            c.rect(x0, y + 5, x0 + col_w, y + ph, CARD, r=14)
+            c.text(x0 + 16, y + 18, name, 18, color, bold=True)
+            c.text(x0 + 16 + c.text_w(name, 18, True) + 8, y + 22, c.fit(intro, 12, col_w - 120), 12, SUB)
+            iy = y + 58
+            for cmd, short in items:
+                head = _cmd_parts(cmd)[0]
+                c.text(x0 + 16, iy, head, 14, TEXT, bold=True)
+                c.text(x0 + 16 + max(c.text_w(head, 14, True) + 10, 86), iy + 1,
+                       c.fit(short, 13, col_w - 120), 13, SUB)
+                iy += item_h
+        y += ph + 12
+    c.text(PAD + 6, h - PAD - 2, "명령어 칸은 자동완성이 돼요. 도시·역 이름을 몇 글자만 쳐도 목록이 떠요.", 12, DIM, anchor="lb")
+    return c.png()
+
+
+def render_help_section(name: str, intro: str, color: tuple[int, int, int], cmds: list[tuple[str, str, str]]):
+    """cmds: [(명령어, 설명, 예시)]."""
+    probe = _Canvas(10, 10)
+    inner = W - 2 * PAD - 40
+    wrapped = [_wrap(probe, what, 14, inner, 3) for _, what, _ in cmds]
+    blocks = [44 + len(w) * 21 + 44 for w in wrapped]
+    h = PAD + 76 + sum(b + 10 for b in blocks) + 22 + PAD
+    c = _Canvas(W, h)
+    c.rect(PAD, PAD, W - PAD, PAD + 64, CARD, r=14)
+    c.rect(PAD, PAD, PAD + 6, PAD + 64, color, r=3)
+    c.text(PAD + 22, PAD + 32, name, 24, color, bold=True, anchor="lm")
+    c.text(PAD + 22 + c.text_w(name, 24, True) + 12, PAD + 34, intro, 15, SUB, anchor="lm")
+    y = PAD + 76
+    for (cmd, _, example), lines, bh in zip(cmds, wrapped, blocks):
+        c.rect(PAD, y, W - PAD, y + bh, CARD, r=12)
+        head, args = _cmd_parts(cmd)
+        c.text(PAD + 20, y + 14, head, 18, TEXT, bold=True)
+        if args:
+            c.text(PAD + 20 + c.text_w(head, 18, True) + 8, y + 17, args, 15, color)
+        ly = y + 46
+        for ln in lines:
+            c.text(PAD + 20, ly, ln, 14, (205, 208, 216))
+            ly += 21
+        ex = c.fit(f"예) {example}", 13, inner - 20)
+        ew = c.text_w(ex, 13) + 22
+        c.rect(PAD + 20, ly + 6, PAD + 20 + ew, ly + 32, (24, 25, 29), r=7)
+        c.text(PAD + 31, ly + 19, ex, 13, (170, 200, 255), anchor="lm")
+        y += bh + 10
+    c.text(PAD + 6, h - PAD - 2, "[ ] 안은 비워도 되는 칸이에요", 12, DIM, anchor="lb")
+    return c.png()

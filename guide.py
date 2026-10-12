@@ -37,7 +37,7 @@ SECTIONS: dict[str, tuple[str, str, list[tuple[str, str, str]]]] = {
         ("/여행 만들기", "여행 카드를 만들어요. 참가 버튼, 일정, 날씨·관광·버스 바로가기가 붙어요. "
                        "출발 전날 저녁 8시에 알림이 와요.", "/여행 만들기 이름:강릉 1박2일 시작날짜:10/25 끝날짜:10/26 장소:강릉"),
         ("/여행 일정추가 · 일정삭제", "날짜·시간별 일정을 넣고 빼요.", "/여행 일정추가 여행:강릉 1박2일 날짜:10/25 할일:안목 커피거리 시간:14:00"),
-        ("/여행 일정표", "일정을 날짜별 타임라인 사진으로. 여행 카드의 🗓️ 버튼으로도 볼 수 있어요.",
+        ("/여행 일정표", "일정을 날짜별 타임라인 사진으로. 여행 카드의 일정표 버튼으로도 볼 수 있어요.",
          "/여행 일정표 여행:강릉 1박2일"),
         ("/여행 투표", "날짜·숙소 같은 걸 투표로 정해요. 여러 개 고를 수 있고, 만든 사람이 마감해요.",
          "/여행 투표 여행:강릉 1박2일 질문:어디서 잘까? 선택지:펜션, 호텔, 게하"),
@@ -45,6 +45,27 @@ SECTIONS: dict[str, tuple[str, str, list[tuple[str, str, str]]]] = {
         ("/여행 목록 · 보기 · 삭제", "다가오는 여행 보기, 카드 다시 띄우기, 지우기(만든 사람만).", "/여행 목록"),
     ]),
 }
+
+SECTION_COLORS = {"이동": (91, 140, 255), "지하철": (60, 190, 120), "여행지": (240, 160, 50),
+                  "같이 여행": (200, 120, 240)}
+
+# 처음 화면 그림에 쓰는 짧은 설명
+SHORT = {
+    "/버스": "버스 편·남은 자리", "/기차": "기차 시간표·요금", "/중간도시": "모이기 좋은 도시",
+    "/지하철": "경로·환승·방향", "/도착": "실시간 도착 전광판", "/막차": "첫차·막차",
+    "/노선도": "직접 그린 노선도", "/어디가지": "여행지 랜덤 뽑기", "/날씨": "날씨 카드",
+    "/주말날씨": "주말 날씨 비교", "/근처": "근처 맛집·숙소", "/뭐먹지": "맛집 랜덤 뽑기",
+    "/관광": "관광지·축제 목록", "/혼잡": "서울 혼잡도 그래프", "/여행 만들기": "여행 카드 만들기",
+    "/여행 일정추가 · 일정삭제": "일정 넣고 빼기", "/여행 일정표": "일정 타임라인 사진",
+    "/여행 투표": "같이 정하기 투표", "/여행 준비물": "준비물 체크리스트", "/여행 목록 · 보기 · 삭제": "여행 보기·지우기",
+}
+
+TIPS_IMAGE = [
+    ("갈 데가 없으면", ["/어디가지", "/주말날씨"]),
+    ("정했으면", ["/여행 만들기", "/여행 투표"]),
+    ("표 볼 땐", ["/버스", "/기차", "/중간도시"]),
+    ("가서는", ["/근처", "/뭐먹지", "/지하철"]),
+]
 
 START_TIPS = [
     "🎲 갈 데가 없으면 → `/어디가지`",
@@ -78,6 +99,47 @@ def help_embed(section: str | None) -> discord.Embed:
     return section_embed(section) if section in SECTIONS else home_embed()
 
 
+_png_cache: dict[str | None, bytes] = {}
+
+
+def help_png(section: str | None) -> bytes:
+    """도움말 그림 (내용이 안 바뀌니 한 번 그리면 계속 씀)."""
+    if section not in _png_cache:
+        import cards
+        if section in SECTIONS:
+            _, intro, cmds = SECTIONS[section]
+            png = cards.render_help_section(section, intro, SECTION_COLORS[section],
+                                            [(c, cards.clean(w), e) for c, w, e in cmds])
+        else:
+            secs = [(n, intro, SECTION_COLORS[n], [(c, SHORT.get(c.split(" ")[0] if not c.startswith("/여행") else c,
+                                                                  SHORT.get(c, ""))) for c, _, _ in cmds])
+                    for n, (_, intro, cmds) in SECTIONS.items()]
+            png = cards.render_help_home(secs, TIPS_IMAGE)
+        _png_cache[section] = png.read()
+    return _png_cache[section]
+
+
+HELP_IMAGE = "help.png"
+
+
+def help_message(section: str | None) -> tuple[discord.Embed, list]:
+    """(embed, 첨부). 그림을 못 만들면 글자 embed."""
+    try:
+        data = help_png(section)
+    except Exception:
+        import logging
+        logging.getLogger("seatbot").exception("도움말 그림 실패")
+        return help_embed(section), []
+    from io import BytesIO
+    if section in SECTIONS:
+        emoji = SECTIONS[section][0]
+        e = discord.Embed(title=f"{emoji} 도움말 · {section}", color=COLOR)
+    else:
+        e = discord.Embed(title="🧭 travel 봇 도움말", color=COLOR)
+    e.set_image(url=f"attachment://{HELP_IMAGE}")
+    return e, [discord.File(BytesIO(data), filename=HELP_IMAGE)]
+
+
 class HelpView(discord.ui.View):
     def __init__(self, current: str | None = None):
         super().__init__(timeout=600)
@@ -92,14 +154,16 @@ class HelpView(discord.ui.View):
     @staticmethod
     def _go(key):
         async def cb(interaction: discord.Interaction):
-            await interaction.response.edit_message(embed=help_embed(key), view=HelpView(key))
+            embed, files = help_message(key)
+            await interaction.response.edit_message(embed=embed, view=HelpView(key), attachments=files)
 
         return cb
 
 
 async def send_help(interaction: discord.Interaction, section: str | None = None):
     section = section if section in SECTIONS else None
-    await interaction.response.send_message(embed=help_embed(section), view=HelpView(section), ephemeral=True)
+    embed, files = help_message(section)
+    await interaction.response.send_message(embed=embed, files=files, view=HelpView(section), ephemeral=True)
 
 
 def register(tree: app_commands.CommandTree):
