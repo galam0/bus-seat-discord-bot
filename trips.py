@@ -27,6 +27,30 @@ class Item:
 
 
 @dataclass
+class Poll:
+    id: int
+    question: str
+    options: list[str]
+    votes: list[list[int]]  # 선택지별 투표한 사람
+    by: int
+    closed: bool = False
+
+    def total_voters(self) -> int:
+        return len({u for v in self.votes for u in v})
+
+
+@dataclass
+class Check:
+    text: str
+    owner: int = 0  # 챙기기로 한 사람 (0 = 아직 없음)
+    done: bool = False
+    by: int = 0
+
+
+DEFAULT_CHECKS = ["신분증", "보조배터리", "충전기", "세면도구", "상비약", "우산"]
+
+
+@dataclass
 class Trip:
     id: int
     guild: int
@@ -39,6 +63,8 @@ class Trip:
     members: list[int] = field(default_factory=list)
     items: list[Item] = field(default_factory=list)
     reminded: bool = False
+    polls: list[Poll] = field(default_factory=list)
+    checklist: list[Check] = field(default_factory=list)
 
     @property
     def start_date(self) -> date:
@@ -67,6 +93,8 @@ class Trip:
     def from_json(d: dict) -> "Trip":
         d = dict(d)
         d["items"] = [Item(**i) for i in d.get("items", [])]
+        d["polls"] = [Poll(**p) for p in d.get("polls", [])]
+        d["checklist"] = [Check(**c) for c in d.get("checklist", [])]
         return Trip(**d)
 
 
@@ -270,6 +298,82 @@ class TripBook:
         item = trip.items.pop(index)
         await self.save(trip)
         return item
+
+    # ---- 투표
+    def poll(self, trip: Trip, poll_id: int) -> Poll | None:
+        return next((p for p in trip.polls if p.id == poll_id), None)
+
+    async def add_poll(self, trip: Trip, question: str, options: list[str], by: int) -> Poll:
+        question = question.strip()[:100]
+        opts = [o.strip()[:50] for o in options if o.strip()]
+        opts = list(dict.fromkeys(opts))
+        if not question:
+            raise ValueError("질문을 적어 주세요.")
+        if not (2 <= len(opts) <= 10):
+            raise ValueError("선택지는 2~10개를 쉼표로 나눠 적어 주세요. (예: 10/25, 11/1, 11/8)")
+        if len(trip.polls) >= 20:
+            raise ValueError("투표는 여행마다 20개까지만 돼요.")
+        pid = max((p.id for p in trip.polls), default=0) + 1
+        poll = Poll(pid, question, opts, [[] for _ in opts], by)
+        trip.polls.append(poll)
+        await self.save(trip)
+        return poll
+
+    async def toggle_vote(self, trip: Trip, poll: Poll, index: int, user: int) -> bool:
+        """투표하면 True, 취소하면 False. 여러 개 골라도 된다."""
+        if poll.closed:
+            raise ValueError("마감된 투표예요.")
+        voters = poll.votes[index]
+        if user in voters:
+            voters.remove(user)
+            voted = False
+        else:
+            voters.append(user)
+            voted = True
+        await self.save(trip)
+        return voted
+
+    async def close_poll(self, trip: Trip, poll: Poll) -> None:
+        poll.closed = True
+        await self.save(trip)
+
+    # ---- 준비물
+    async def add_checks(self, trip: Trip, texts: list[str], by: int) -> list[Check]:
+        have = {c.text for c in trip.checklist}
+        added = []
+        for t in texts:
+            t = t.strip()[:40]
+            if t and t not in have and len(trip.checklist) < 25:
+                c = Check(t, by=by)
+                trip.checklist.append(c)
+                have.add(t)
+                added.append(c)
+        if not added:
+            raise ValueError("새로 넣을 준비물이 없어요. (이미 있거나, 25개가 꽉 찼어요)")
+        await self.save(trip)
+        return added
+
+    async def toggle_claim(self, trip: Trip, index: int, user: int) -> bool:
+        c = trip.checklist[index]
+        if c.owner == user:
+            c.owner = 0
+            claimed = False
+        else:
+            c.owner = user
+            claimed = True
+        await self.save(trip)
+        return claimed
+
+    async def toggle_done(self, trip: Trip, index: int) -> bool:
+        c = trip.checklist[index]
+        c.done = not c.done
+        await self.save(trip)
+        return c.done
+
+    async def remove_check(self, trip: Trip, index: int) -> Check:
+        c = trip.checklist.pop(index)
+        await self.save(trip)
+        return c
 
     async def delete(self, trip: Trip):
         await self.store.delete(trip.id)

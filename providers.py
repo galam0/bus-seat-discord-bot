@@ -222,15 +222,101 @@ class MockTrainProvider:
 
 
 class TagoTrainProvider:
-    """기차 실제 조회 자리. 연동 전."""
+    """국토교통부 TAGO 열차정보 (공공데이터포털). 시간표·요금만 있고 잔여석은 없다.
 
-    label = "공공데이터포털 열차정보"
+    2026-03 부터 주소가 TrainInfoService -> TrainInfo, 기능 이름이 대문자로 시작하게 바뀌었다.
+    """
+
+    label = "국토교통부 열차정보"
+    BASE = "https://apis.data.go.kr/1613000/TrainInfo"
+
+    def __init__(self, key: str | None = None, session=None):
+        import os
+
+        self.key = key or os.getenv("KMA_API_KEY")
+        self.session = session
+        self.stations: dict[str, str] = {}  # 역 이름 -> nodeid
+        self._loading = None
+
+    async def _get(self, op: str, **params) -> list[dict]:
+        if not self.key:
+            raise ProviderUnavailable("공공데이터포털 키(KMA_API_KEY)가 아직 없어요.")
+        if self.session is None:
+            import aiohttp
+
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+        q = {"serviceKey": self.key, "_type": "json", "numOfRows": "1000", "pageNo": "1", **params}
+        async with self.session.get(f"{self.BASE}/{op}", params=q) as r:
+            text = await r.text()
+        import json
+
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise ProviderUnavailable(f"열차정보 응답을 읽을 수 없어요: {text[:100]}")
+        if "OpenAPI_ServiceResponse" in data:
+            msg = data["OpenAPI_ServiceResponse"].get("cmmMsgHeader", {}).get("returnAuthMsg", "")
+            if "등록되지 않은" in msg:
+                raise ProviderUnavailable("기차 시간표 API 활용신청이 아직 승인 전이에요. (국토교통부_(TAGO)_열차정보)")
+            raise ProviderUnavailable(f"열차정보 오류: {msg}")
+        body = data.get("response", {}).get("body", {})
+        items = body.get("items") or {}
+        if isinstance(items, str):
+            return []
+        item = items.get("item") or []
+        return item if isinstance(item, list) else [item]
+
+    async def _load_stations(self):
+        cities = await self._get("GetCtyCodeList")
+        names: dict[str, str] = {}
+        for c in cities:
+            for st in await self._get("GetCtyAcctoTrainSttnList", cityCode=str(c.get("citycode"))):
+                name = str(st.get("nodename", "")).strip()
+                if name and st.get("nodeid"):
+                    names.setdefault(name, str(st["nodeid"]))
+        if not names:
+            raise ProviderUnavailable("기차역 목록이 비어 있어요.")
+        self.stations = dict(sorted(names.items()))
+        log.info("기차역 %d곳 불러옴", len(self.stations))
 
     async def terminals(self) -> list[str]:
-        raise ProviderUnavailable(NOT_READY)
+        if not self.stations:
+            import asyncio
+
+            if self._loading is None or self._loading.done():
+                self._loading = asyncio.ensure_future(self._load_stations())
+            await self._loading
+        return list(self.stations)
 
     async def search(self, dep: str, arr: str, day: date) -> list[TrainTrip]:
-        raise ProviderUnavailable(NOT_READY)
+        await self.terminals()
+        if dep not in self.stations or arr not in self.stations:
+            raise ProviderUnavailable("기차역 이름을 자동완성 목록에서 골라주세요.")
+        rows = await self._get("GetStrtpntAlocFndTrainInfo", depPlaceId=self.stations[dep],
+                               arrPlaceId=self.stations[arr], depPlandTime=day.strftime("%Y%m%d"))
+        return parse_tago_trains(rows)
+
+
+def _hm(v) -> str:
+    s = str(v or "")
+    return f"{s[8:10]}:{s[10:12]}" if len(s) >= 12 else ""
+
+
+def parse_tago_trains(rows: list[dict]) -> list[TrainTrip]:
+    out = []
+    for r in rows:
+        dep, arr = _hm(r.get("depplandtime")), _hm(r.get("arrplandtime"))
+        if not dep:
+            continue
+        grade = str(r.get("traingradename") or "").strip()
+        no = str(r.get("trainno") or "").strip()
+        try:
+            fare = int(r.get("adultcharge") or 0)
+        except (TypeError, ValueError):
+            fare = 0
+        out.append(TrainTrip(f"{grade} {no}".strip(), dep, arr, grade=grade, fare=fare))
+    out.sort(key=lambda t: t.depart)
+    return out
 
 
 # ---------------------------------------------------------------- 설정

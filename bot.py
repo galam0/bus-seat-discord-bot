@@ -175,6 +175,14 @@ class SeatBot(discord.Client):
     async def setup_hook(self):
         await travel.state.start()  # 지하철 데이터는 뒤에서 불러온다
         self.loop.create_task(travel.trips_ui.reminder_loop(self))
+        self.loop.create_task(self._preload_train())
+
+    async def _preload_train(self):
+        if self.train is not None and hasattr(self.train, "_load_stations"):
+            try:
+                await self.train.terminals()
+            except Exception as e:
+                log.warning("기차역 목록 미리 불러오기 실패: %s", str(e)[:150])
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
             guild = discord.Object(int(guild_id))
@@ -307,9 +315,6 @@ async def start_health_server(port: int):
 async def amain():
     port = os.getenv("PORT")  # Render 가 넣어줌. 로컬에선 보통 비어 있음
     runner = await start_health_server(int(port)) if port else None
-    if port:  # (임시) 혼잡도·기차 API 응답 형식 확인
-        from probe import run_probe
-        asyncio.get_running_loop().create_task(run_probe())
     token = os.getenv("DISCORD_TOKEN")
     try:
         if not token:
@@ -319,7 +324,7 @@ async def amain():
             log.error("%s 토큰을 넣으면 자동으로 다시 시작돼요.", msg)
             await asyncio.Event().wait()  # 서버는 살려둔다
         client.bus = get_bus_provider(os.getenv("BUS_PROVIDER", "mock"))
-        client.train = get_train_provider(os.getenv("TRAIN_PROVIDER", "mock"))
+        client.train = get_train_provider(os.getenv("TRAIN_PROVIDER", "tago"))
         async with client:
             await client.start(token)
     finally:

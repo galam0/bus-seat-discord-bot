@@ -17,6 +17,8 @@ import timetable
 import tour
 import trips_ui
 from dust import fetch_dust
+import congestion
+import roulette
 from trips import MemoryStore, NeonStore, TripBook
 
 log = logging.getLogger("seatbot.travel")
@@ -72,6 +74,7 @@ class TravelState:
         self.subway = SubwayData([general, metro])
         self.realtime_keys = [k for k in dict.fromkeys([metro, general]) if k]
         self.kma_key = os.getenv("KMA_API_KEY")
+        self.areas = congestion.AreaList()
         self._loading: asyncio.Task | None = None
 
     async def start(self):
@@ -80,6 +83,8 @@ class TravelState:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         self._loading = asyncio.create_task(self.subway.load(self.session))
         asyncio.create_task(self.self_check())
+        if self.subway.keys:
+            asyncio.create_task(self.areas.verify(self.session, self.subway.keys[0]))
         await self.load_trips()
 
     async def load_trips(self):
@@ -549,6 +554,137 @@ async def send_last_train(interaction: discord.Interaction, station: str, day: s
     await interaction.followup.send(embed=embed)
 
 
+# ---------------------------------------------------------------- 혼잡도
+
+def crowd_embed(c: congestion.Crowd) -> discord.Embed:
+    e = discord.Embed(title=f"{c.emoji} {c.area} · 지금 {c.level}", color=c.color,
+                      description=f"{c.message}\n👥 약 {congestion.fmt_people(c.low, c.high)} · {c.time[11:16]} 기준")
+    rows = []
+    for f in c.forecast[:6]:
+        emo = congestion.LEVELS.get(f.level, ("⚪", 0))[0]
+        rows.append(f"`{f.time}` {emo} {f.level} · {congestion.fmt_people(f.low, f.high)}")
+    if rows:
+        e.add_field(name="앞으로 6시간", value="\n".join(rows), inline=False)
+    q = c.quietest()
+    if q:
+        emo = congestion.LEVELS.get(q.level, ("⚪", 0))[0]
+        e.add_field(name="12시간 안에 가장 한산할 때", value=f"{emo} **{q.time}** ({q.level})", inline=False)
+    e.set_footer(text="서울시 실시간 도시데이터 · 휴대폰 신호로 추정한 인구예요")
+    return e
+
+
+async def send_crowd(interaction: discord.Interaction, area: str):
+    keys = state.subway.keys
+    if not keys:
+        await interaction.response.send_message("⚠️ 서울시 키(SEOUL_API_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    name = area.strip()
+    if name not in state.areas.valid:
+        found = state.areas.search(name, 5)
+        if len(found) == 1:
+            name = found[0]
+        elif not found:
+            await interaction.response.send_message("그런 장소가 없어요. 자동완성 목록에서 골라주세요. (서울 주요 장소만 돼요)",
+                                                    ephemeral=True)
+            return
+        else:
+            await interaction.response.send_message("이 중에서 골라주세요: " + ", ".join(found), ephemeral=True)
+            return
+    await interaction.response.defer(thinking=True)
+    try:
+        crowd = await congestion.fetch_crowd(state.session, keys[0], name)
+    except Exception as e:
+        log.warning("혼잡도 실패: %s", str(e)[:150])
+        crowd = None
+    if crowd is None:
+        await interaction.followup.send(f"**{name}** 혼잡도를 받아오지 못했어요. 잠시 후 다시 해 주세요.", ephemeral=True)
+        return
+    await interaction.followup.send(embed=crowd_embed(crowd))
+
+
+async def area_autocomplete(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=a, value=a) for a in state.areas.search(current)]
+
+
+# ---------------------------------------------------------------- 어디가지
+
+TIME_CHOICES = {"1시간": 60, "2시간": 120, "3시간": 180, "4시간": 240, "상관없음": None}
+
+
+def roulette_embed(origin: str, p: roulette.Pick, max_label: str, theme: str | None, n: int) -> discord.Embed:
+    tags = " ".join(f"{roulette.THEME_EMOJI[t]} {t}" for t in p.themes)
+    e = discord.Embed(title=f"🎲 {origin}에서 떠나는 여행지는…", color=0x9B59B6,
+                      description=f"## 📍 {p.place}\n{p.blurb}\n\n{tags}\n{p.travel_text()}")
+    cond = [max_label if max_label != "상관없음" else "시간 상관없음", theme or "테마 상관없음"]
+    e.set_footer(text=f"조건: {' · '.join(cond)} · 후보 {n}곳 중에서 뽑았어요 · 시간은 버스 기준 대략값")
+    return e
+
+
+class RouletteView(discord.ui.View):
+    def __init__(self, origin: str, max_label: str, theme: str | None, p: roulette.Pick, seen: set[str],
+                 start_bus=None):
+        super().__init__(timeout=1800)
+        self.origin, self.max_label, self.theme, self.pick, self.seen = origin, max_label, theme, p, seen
+        self.start_bus = start_bus
+        self._btn("다시 뽑기", "🎲", self.reroll, discord.ButtonStyle.primary)
+        self._btn("날씨", "🌤️", self.weather)
+        self._btn("관광", "🏞️", self.tour)
+        bus = self._btn("버스", "🚌", self.bus)
+        bus.disabled = p.minutes is None or p.place not in CITIES or self.origin not in CITIES or not start_bus
+        self._btn("여행으로 만들기", "🧳", self.make_trip, discord.ButtonStyle.success, row=1)
+
+    def _btn(self, label, emoji, cb, style=discord.ButtonStyle.secondary, row=0):
+        b = discord.ui.Button(label=label, emoji=emoji, style=style, row=row)
+        b.callback = cb
+        self.add_item(b)
+        return b
+
+    async def reroll(self, interaction: discord.Interaction):
+        await send_roulette(interaction, self.origin, self.max_label, self.theme, seen=self.seen, edit=True,
+                            start_bus=self.start_bus)
+
+    async def weather(self, interaction: discord.Interaction):
+        await send_weather(interaction, self.pick.place)
+
+    async def tour(self, interaction: discord.Interaction):
+        await send_tour(interaction, self.pick.place, "관광지")
+
+    async def bus(self, interaction: discord.Interaction):
+        await self.start_bus(interaction, self.origin, self.pick.place)
+
+    async def make_trip(self, interaction: discord.Interaction):
+        if interaction.guild_id is None:
+            await interaction.response.send_message("서버 안에서만 여행을 만들 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.send_modal(trips_ui.CreateTripModal(self.pick.place))
+
+
+async def send_roulette(interaction: discord.Interaction, origin: str, max_label: str = "상관없음",
+                        theme: str | None = None, seen: set[str] | None = None, edit: bool = False, start_bus=None):
+    if origin not in PLACES:
+        await interaction.response.send_message("출발 도시를 자동완성 목록에서 골라주세요.", ephemeral=True)
+        return
+    theme = theme if theme in roulette.THEMES else None
+    max_label = max_label if max_label in TIME_CHOICES else "상관없음"
+    seen = set(seen or ())
+    p, n = roulette.pick(origin, TIME_CHOICES[max_label], theme, avoid=seen)
+    if p is None:
+        await interaction.response.send_message("조건에 맞는 곳이 없어요. 시간을 늘리거나 테마를 바꿔 보세요.", ephemeral=True)
+        return
+    seen.add(p.place)
+    if len(seen) >= n:  # 다 한 번씩 나왔으면 처음부터
+        seen = {p.place}
+    embed = roulette_embed(origin, p, max_label, theme, n)
+    view = RouletteView(origin, max_label, theme, p, seen, start_bus or _start_bus_hook.get("fn"))
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+_start_bus_hook: dict = {}
+
+
 # ---------------------------------------------------------------- 중간도시 -> 버스 버튼
 
 class MidpointBusView(discord.ui.View):
@@ -579,6 +715,24 @@ async def tour_kind_autocomplete(interaction: discord.Interaction, current: str)
 
 def register(tree: app_commands.CommandTree, start_bus=None):
     trips_ui.register(tree, start_bus=start_bus, send_weather=send_weather, send_tour=send_tour)
+    _start_bus_hook["fn"] = start_bus
+
+    @tree.command(name="혼잡", description="서울 주요 장소의 지금 혼잡도와 앞으로 예측을 보여줘요")
+    @app_commands.rename(area="장소")
+    @app_commands.describe(area="예: 홍대, 성수, 강남역, 여의도한강공원")
+    @app_commands.autocomplete(area=area_autocomplete)
+    async def crowd_cmd(interaction: discord.Interaction, area: str):
+        await send_crowd(interaction, area)
+
+    @tree.command(name="어디가지", description="조건에 맞는 여행지를 랜덤으로 골라줘요")
+    @app_commands.rename(origin="출발", hours="시간", theme="테마")
+    @app_commands.describe(origin="출발 도시", hours="버스로 이만큼 안에 갈 수 있는 곳", theme="원하는 분위기")
+    @app_commands.choices(hours=[app_commands.Choice(name=k, value=k) for k in TIME_CHOICES],
+                          theme=[app_commands.Choice(name=t, value=t) for t in roulette.THEMES])
+    @app_commands.autocomplete(origin=city_autocomplete)
+    async def roulette_cmd(interaction: discord.Interaction, origin: str, hours: str | None = None,
+                           theme: str | None = None):
+        await send_roulette(interaction, origin, hours or "상관없음", theme)
 
     @tree.command(name="관광", description="도시의 관광지·맛집·축제·숙소를 보여줘요 (한국관광공사)")
     @app_commands.rename(city="도시", kind="종류")

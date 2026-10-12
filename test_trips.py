@@ -283,12 +283,13 @@ class TripUITest(unittest.TestCase):
         self.assertIn("D-13", kw["embed"].description)
         self.assertIn("<@7>", kw["embed"].description)
         ids = [b.custom_id for b in kw["view"].children]
-        self.assertEqual(ids, ["trip:join:1", "trip:add:1", "trip:refresh:1", "trip:weather:1", "trip:tour:1", "trip:bus:1"])
+        self.assertEqual(ids, ["trip:join:1", "trip:add:1", "trip:check:1", "trip:refresh:1", "trip:weather:1",
+                               "trip:tour:1", "trip:bus:1"])
         self.assertIn("임시 저장", kw["embed"].footer)  # 메모리 저장이면 알려줌
 
     def test_no_place_no_extra_buttons(self):
         i = self.create(name="미정", place=None)
-        self.assertEqual(len(i.response.send_message.await_args.kwargs["view"].children), 3)
+        self.assertEqual(len(i.response.send_message.await_args.kwargs["view"].children), 4)
 
     def test_bad_date(self):
         i = fake_interaction()

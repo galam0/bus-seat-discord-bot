@@ -88,15 +88,41 @@ def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
 def train_embed(dep: str, arr: str, day_label: str, trips: list[TrainTrip],
                 source: str, page: int = 0) -> discord.Embed:
     start, end = page_range(len(trips), page)
-    lines = [
-        f"`{t.depart}→{t.arrive}` {t.name} · 일반 {t.general} · 특실 {t.special}"
-        for t in trips[start:end]
-    ]
+    lines = []
+    for t in trips[start:end]:
+        if t.general:  # 테스트 데이터: 예약 상태
+            lines.append(f"`{t.depart}→{t.arrive}` {t.name} · 일반 {t.general} · 특실 {t.special}")
+        else:  # 실제 시간표: 등급·요금
+            mins = _duration(t.depart, t.arrive)
+            fare = f" · {t.fare:,}원" if t.fare else ""
+            lines.append(f"`{t.depart}→{t.arrive}` **{t.name}**{fare}" + (f" · {mins}" if mins else ""))
     body = "\n".join(lines) if lines else "남은 편이 없어요."
-    head = f"**{day_label}**  ({len(trips)}편)" + _page_text(len(trips), page)
+    grades = " · ".join(f"{g} {n}편" for g, n in _count_grades(trips))
+    head = f"**{day_label}**  ({len(trips)}편{' · ' + grades if grades else ''})" + _page_text(len(trips), page)
     e = discord.Embed(title=f"🚆 {dep} → {arr}", description=f"{head}\n{body}")
-    e.set_footer(text=f"출처: {source} · 기차는 잔여 석수 없이 상태만 보여요")
+    note = "잔여석은 공개 데이터에 없어서 시간표·요금만 보여요" if trips and not trips[0].general \
+        else "테스트 데이터"
+    e.set_footer(text=f"출처: {source} · {note}")
     return e
+
+
+def _duration(dep: str, arr: str) -> str:
+    try:
+        a = int(dep[:2]) * 60 + int(dep[3:5])
+        b = int(arr[:2]) * 60 + int(arr[3:5])
+    except ValueError:
+        return ""
+    m = (b - a) % (24 * 60)
+    h, r = divmod(m, 60)
+    return f"{h}시간 {r}분" if h and r else (f"{h}시간" if h else f"{r}분")
+
+
+def _count_grades(trips) -> list[tuple[str, int]]:
+    out: dict[str, int] = {}
+    for t in trips:
+        if t.grade:
+            out[t.grade] = out.get(t.grade, 0) + 1
+    return sorted(out.items(), key=lambda x: -x[1])[:4]
 
 
 def midpoint_embed(origins: list[str], cands: list[Candidate]) -> discord.Embed:

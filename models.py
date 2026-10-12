@@ -42,5 +42,7 @@ class TrainTrip:
     name: str  # "KTX 101"
     depart: str
     arrive: str
-    general: str  # 예약가능 / 매진 / 입석
-    special: str
+    general: str = ""  # 예약가능 / 매진 / 입석 (테스트 데이터만)
+    special: str = ""
+    grade: str = ""  # KTX / ITX-새마을 / 무궁화호 ...
+    fare: int = 0  # 어른 요금 (원)
