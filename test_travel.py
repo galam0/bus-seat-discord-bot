@@ -84,7 +84,8 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(r.legs[-1].stations, ["교대", "남부터미널"])
         r = find_route(n, "용답", "시청")
         self.assertEqual(r.legs[0].stations[:2], ["용답", "성수"])
-        self.assertEqual(r.transfers, 0)  # 시청은 1·2호선 둘 다 있지만 환승하지 않음
+        self.assertEqual(r.transfers, 1)  # 성수에서 지선 -> 본선 열차 갈아타기
+        self.assertEqual(r.legs[-1].stations[-1], "시청")
         self.assertIsNone(find_route(n, "서울", "서울"))
         self.assertIsNone(find_route(n, "서울", "없는역"))
 
@@ -100,6 +101,27 @@ class NetworkTest(unittest.TestCase):
         a, b = n.by_name["서초"][0], n.by_name["교대"]
         self.assertTrue(all(x not in n.adj[a] for x in b))
         apply_fixes(n, {"2호선": {"remove": [("교대", "서초")]}})  # 이미 없으면 경고만
+
+    def test_headings(self):
+        n = net()
+        r = find_route(n, "시청", "을지로4가")
+        self.assertEqual((r.legs[0].toward, r.legs[0].loop), ("을지로입구 방면", "내선순환"))
+        r = find_route(n, "시청", "아현")
+        self.assertEqual(r.legs[0].heading, "충정로 방면 · 외선순환")
+        r = find_route(n, "구로", "종각")
+        self.assertEqual(r.legs[0].heading, "서울 방면 · 종각 방향")
+        r = find_route(n, "교대", "남부터미널")
+        self.assertEqual(r.legs[0].heading, "남부터미널 방면")  # 같은 말 반복 안 함
+
+    def test_line2_branch_needs_train_change(self):
+        n = net()
+        r = find_route(n, "용답", "시청")
+        self.assertEqual([l.stations[0] for l in r.legs], ["용답", "성수"])
+        self.assertEqual(r.transfers, 1)
+        self.assertEqual(r.legs[0].heading, "성수 방면")
+        self.assertEqual(r.legs[1].loop, "외선순환")
+        r = find_route(n, "시청", "용답")
+        self.assertEqual(r.legs[-1].heading, "용답 방면 · 신답 방향")
 
     def test_missing_coords_still_builds(self):
         n = build_network([], line_rows())
@@ -145,13 +167,13 @@ class ImageTest(unittest.TestCase):
         from PIL import Image
         n = net()
         r = find_route(n, "서울", "남부터미널")
-        for png in (subway_images.render_route(r, "서울", "남부터미널"),
-                    subway_images.render_map(n),
+        self.assertEqual(Image.open(subway_images.render_route(r, "서울", "남부터미널")).format, "PNG")
+        for png in (subway_images.render_map(n),
                     subway_images.render_map(n, line="2호선"),
                     subway_images.render_map(n, route=r)):
             img = Image.open(png)
             self.assertEqual(img.format, "PNG")
-            self.assertLessEqual(img.height, img.width * 1.4)
+            self.assertLessEqual(img.height, img.width * 1.4)  # 지도는 너무 길쭉하지 않게
 
     def test_long_leg_folds(self):
         from subway_images import MAX_MIDDLE, _leg_rows
@@ -251,6 +273,29 @@ class TravelCommandTest(unittest.TestCase):
         self.assertEqual(kw["files"][0].filename, "route.png")
         self.assertIn("환승 2회", kw["embed"].description)
         self.assertIsInstance(kw["view"], self.travel.RouteView)
+
+    def test_route_tells_where_to_board(self):
+        s = self.travel.state
+        s.realtime_keys = ["k"]
+        board = {"errorMessage": {"code": "INFO-000"}, "realtimeArrivalList": [
+            {"subwayId": "1004", "updnLine": "하행", "trainLineNm": "오이도행 - 회현방면", "barvlDt": "120",
+             "arvlMsg2": "2분 후", "arvlMsg3": "숙대입구", "btrainSttus": "일반"},
+            {"subwayId": "1004", "updnLine": "상행", "trainLineNm": "당고개행 - 숙대입구방면", "barvlDt": "60",
+             "arvlMsg2": "1분 후", "arvlMsg3": "회현", "btrainSttus": "일반"},
+            {"subwayId": "1001", "updnLine": "상행", "trainLineNm": "광운대행 - 시청방면", "barvlDt": "30",
+             "arvlMsg2": "곧 도착", "arvlMsg3": "남영", "btrainSttus": "일반"}]}
+        s.session = MagicMock()
+        s.session.get = MagicMock(return_value=_Resp(board))
+        i = fake_interaction()
+        run(self.travel.subway_route(i, "서울", "남부터미널"))
+        desc = i.followup.send.await_args.kwargs["embed"].description
+        self.assertIn("**서울**에서 **회현 방면", desc)
+        self.assertIn("다음 열차: 2분 0초 후 (숙대입구)", desc)
+        self.assertNotIn("1분 0초", desc)  # 반대 방향·다른 노선은 빼기
+
+    def test_route_text_has_heading(self):
+        r = find_route(net(), "서울", "남부터미널")
+        self.assertIn("▶ 회현 방면", self.travel.route_text(r))
 
     def test_route_unknown_station(self):
         i = fake_interaction()

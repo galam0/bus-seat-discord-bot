@@ -116,6 +116,20 @@ class Leg:
     line: str
     stations: list[str]  # 타는 역 ~ 내리는 역
     minutes: float
+    ids: list[str] = field(default_factory=list)  # 같은 순서의 node id
+    toward: str = ""  # '합정 방면'
+    loop: str = ""  # 2호선 '내선순환' / '외선순환'
+    ends: list[str] = field(default_factory=list)  # 이 방향 종점(갈래가 있으면 여럿)
+
+    @property
+    def heading(self) -> str:
+        """'합정 방면 · 내선순환' / '구로 방면 · 인천·신창 방향'."""
+        parts = [self.toward] if self.toward else []
+        if self.loop:
+            parts.append(self.loop)
+        elif self.ends:
+            parts.append("·".join(self.ends[:2]) + (" 등" if len(self.ends) > 2 else "") + " 방향")
+        return " · ".join(parts)
 
 
 @dataclass
@@ -401,15 +415,77 @@ def find_route(net: Network, src: str, dst: str) -> Route | None:
         if na.line != nb.line:  # 환승
             continue
         w = net.adj[a][b]
-        if legs and legs[-1].line == na.line and legs[-1].stations[-1] == na.name:
+        # 2호선 지선 <-> 본선(순환)은 같은 노선이어도 열차를 갈아타야 한다 (성수·신도림)
+        kind = "loop" if (_on_loop(net, a) and _on_loop(net, b)) else "line"
+        same_train = not legs or getattr(legs[-1], "_kind", kind) == kind or na.line != "2호선"
+        if legs and legs[-1].line == na.line and legs[-1].stations[-1] == na.name and same_train:
             legs[-1].stations.append(nb.name)
+            legs[-1].ids.append(b)
             legs[-1].minutes += w
         else:
-            legs.append(Leg(na.line, [na.name, nb.name], w))
+            legs.append(Leg(na.line, [na.name, nb.name], w, [a, b]))
+        legs[-1]._kind = kind
     if not legs:
         return None
+    for leg in legs:
+        set_heading(net, leg)
     total = sum(l.minutes for l in legs) + TRANSFER_MIN * (len(legs) - 1)
     return Route(legs, total, path)
+
+
+def _line_neighbors(net: Network, i: str) -> list[str]:
+    line = net.nodes[i].line
+    return [j for j in net.adj[i] if net.nodes[j].line == line]
+
+
+def _on_loop(net: Network, i: str) -> bool:
+    p = parse_fr(net.nodes[i].fr)
+    return net.nodes[i].line == "2호선" and bool(p) and not p[0] and p[2] is None and 201 <= p[1] <= 243
+
+
+def line_ends(net: Network, prev: str, cur: str, limit: int = 400) -> list[str]:
+    """prev -> cur 방향으로 계속 갔을 때 닿는 종점들 (갈래가 있으면 여럿, 순환이면 없음).
+    2호선 지선에서 본선(순환)에 닿으면 그 분기역을 종점으로 본다 (지선 열차는 거기서 끝남)."""
+    ends: list[str] = []
+    seen = {prev}
+    stack = [(prev, cur)]
+    while stack and limit > 0:
+        limit -= 1
+        p, c = stack.pop()
+        if c in seen:
+            continue
+        seen.add(c)
+        nxt = [j for j in _line_neighbors(net, c) if j != p]
+        if _on_loop(net, c) and not _on_loop(net, p):
+            nxt = []
+        if not nxt:
+            ends.append(net.nodes[c].name)
+        stack.extend((c, j) for j in nxt)
+    return list(dict.fromkeys(ends))
+
+
+def loop_direction(net: Network, a: str, b: str) -> str:
+    """2호선 본선에서 a -> b 가 내선(시계 방향, 시청->을지로입구)인지 외선인지."""
+    na, nb = net.nodes[a], net.nodes[b]
+    if na.line != "2호선":
+        return ""
+    pa, pb = parse_fr(na.fr), parse_fr(nb.fr)
+    if not pa or not pb or pa[0] or pb[0] or pa[2] is not None or pb[2] is not None:
+        return ""  # 성수·신정 지선
+    if not (201 <= pa[1] <= 243 and 201 <= pb[1] <= 243):
+        return ""
+    return "내선순환" if (pb[1] - pa[1]) % 43 <= 21 else "외선순환"
+
+
+def set_heading(net: Network, leg: Leg) -> None:
+    if len(leg.ids) < 2:
+        return
+    leg.toward = f"{leg.stations[1]} 방면"
+    leg.loop = loop_direction(net, leg.ids[0], leg.ids[1])
+    if not leg.loop:
+        ends = line_ends(net, leg.ids[-2], leg.ids[-1]) or [leg.stations[-1]]
+        if ends != [leg.stations[1]]:  # '남부터미널 방면 · 남부터미널 방향' 처럼 겹치면 생략
+            leg.ends = ends
 
 
 def describe(net: Network) -> str:

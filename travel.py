@@ -45,6 +45,8 @@ def route_text(route) -> str:
         mid = len(leg.stations) - 2
         lines.append(f"**{leg.line}** {leg.stations[0]} → {leg.stations[-1]} ({len(leg.stations) - 1}개 역"
                      + (f", 중간 {mid}개" if mid > 0 else "") + ")")
+        if leg.heading:
+            lines.append(f"　▶ {leg.heading} 열차")
     return "\n".join(lines)
 
 
@@ -187,6 +189,17 @@ async def subway_route(interaction: discord.Interaction, src: str, dst: str):
     await interaction.response.defer(thinking=True)
     color = _color_int(line_color(route.legs[0].line))
     head = f"약 {_minutes_text(route.minutes)} · 환승 {route.transfers}회 · {route.stops}개 역"
+    first = route.legs[0]
+    if first.heading:
+        head += f"\n**{first.stations[0]}**에서 **{first.heading}** 열차를 타세요"
+    if state.realtime_keys:
+        try:
+            data = await fetch_realtime(first.stations[0])
+            trains = next_trains(parse_arrivals(data), first) if data else []
+            if trains:
+                head += "\n⏱️ 다음 열차: " + " / ".join(t.message for t in trains)
+        except Exception:
+            log.exception("경로 실시간 실패")
     embed = discord.Embed(title=f"🚇 {src} → {dst}", description=head, color=color)
     files = []
     if subway_images is not None:
@@ -221,13 +234,9 @@ async def subway_map(interaction: discord.Interaction, line: str | None):
     await interaction.followup.send(content=note or None, file=discord.File(png, filename="subway_map.png"))
 
 
-async def send_arrivals(interaction: discord.Interaction, station: str, ephemeral: bool = False):
-    if not state.realtime_keys:
-        await interaction.response.send_message("⚠️ 실시간 지하철 키(SEOUL_SUBWAY_KEY)가 아직 없어요.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True, ephemeral=ephemeral)
+async def fetch_realtime(station: str) -> dict | None:
+    """실시간 도착 원본 응답. 키가 여러 개면 되는 키를 찾아 쓴다. 실패하면 None."""
     name = REALTIME_ALIAS.get(station, station)
-    data = None
     for n, key in enumerate(list(state.realtime_keys), 1):
         url = REALTIME.format(key=key, name=quote(name))
         try:
@@ -235,14 +244,38 @@ async def send_arrivals(interaction: discord.Interaction, station: str, ephemera
                 data = await r.json(content_type=None)
         except Exception:
             log.exception("실시간 도착 실패")
-            data = None
             continue
         if realtime_code(data) in ("INFO-000", "INFO-200", ""):
             if n > 1:  # 되는 키를 앞으로
                 state.realtime_keys.remove(key)
                 state.realtime_keys.insert(0, key)
-            break
+            return data
         log.warning("실시간 도착: %d번째 키 거절 (%s)", n, realtime_code(data))
+    return None
+
+
+def next_trains(arrivals, leg, limit: int = 2) -> list:
+    """경로 첫 구간과 같은 노선·같은 방향 열차만."""
+    want_next = leg.stations[1] if len(leg.stations) > 1 else ""
+    loop = leg.loop[:2]  # '내선' / '외선'
+    out = []
+    for a in arrivals:
+        if a.line != leg.line:
+            continue
+        ok = f"{want_next}방면" in a.heading.replace(" ", "")
+        if loop and a.direction.startswith(loop):
+            ok = True
+        if ok:
+            out.append(a)
+    return out[:limit]
+
+
+async def send_arrivals(interaction: discord.Interaction, station: str, ephemeral: bool = False):
+    if not state.realtime_keys:
+        await interaction.response.send_message("⚠️ 실시간 지하철 키(SEOUL_SUBWAY_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True, ephemeral=ephemeral)
+    data = await fetch_realtime(station)
     if data is None:
         await interaction.followup.send("실시간 정보를 받아오지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
         return

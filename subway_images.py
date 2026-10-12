@@ -57,10 +57,14 @@ def render_route(route: Route, src: str, dst: str) -> BytesIO:
     body = []
     for i, leg in enumerate(route.legs):
         if i:
-            body.append(("transfer", None))
+            same = route.legs[i - 1].line == leg.line
+            body.append(("transfer", "열차 갈아타기 (같은 노선)" if same else "환승"))
         body.append(("badge", leg))
+        if leg.heading:
+            body.append(("heading", leg))
         body += [(k, (t, leg)) for k, t in _leg_rows(leg.stations)]
-    H = head_h + sum(48 if k in ("badge", "transfer") else ROW for k, _ in body) + 40
+    sizes = {"badge": 48, "transfer": 48, "heading": 46}
+    H = head_h + sum(sizes.get(k, ROW) for k, _ in body) + 60
 
     c = _Canvas(W, H)
     c.rect(8, 8, W - 8, H - 8, fill=CARD, r=16)
@@ -74,8 +78,19 @@ def render_route(route: Route, src: str, dst: str) -> BytesIO:
         if kind == "transfer":
             for yy in range(int(y + 6), int(y + 42), 8):
                 c.line([(x_bar, yy), (x_bar, yy + 4)], DIM, 3)
-            c.text(x_bar + 26, y + 24, f"환승 · 약 {int(5)}분", 14, SUB, anchor="lm")
+            c.text(x_bar + 26, y + 24, f"{data} · 약 5분", 14, SUB, anchor="lm")
             y += 48
+            continue
+        if kind == "heading":
+            leg = data
+            color = _rgb(line_color(leg.line))
+            text = c.fit(f"▶ {leg.heading} 열차", 16, W - x_bar - 80, True)
+            w = c.text_w(text, 16, True) + 28
+            c.line([(x_bar, y), (x_bar, y + 46)], _mix(color, CARD, 0.35), 8)
+            c.rect(x_bar + 18, y + 6, x_bar + 18 + w, y + 40, fill=_mix(color, CARD, 0.22), r=10,
+                   outline=color, width=2)
+            c.text(x_bar + 32, y + 23, text, 16, TEXT, True, anchor="lm")
+            y += 46
             continue
         if kind == "badge":
             leg = data
