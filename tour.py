@@ -24,12 +24,22 @@ class Spot:
     km: float | None
     start: str = ""  # 축제 시작 YYYYMMDD
     end: str = ""
+    cat: str = ""  # 음식 종류 (한식·카페 등, 알 때만)
 
     def period(self) -> str:
         if not self.start:
             return ""
         f = lambda s: f"{int(s[4:6])}/{int(s[6:8])}"  # noqa: E731
         return f"{f(self.start)}~{f(self.end)}" if self.end and self.end != self.start else f(self.start)
+
+
+# 음식점 소분류 (관광공사 서비스 분류 코드 cat3)
+FOOD_CATS = {"A05020100": "한식", "A05020200": "양식", "A05020300": "일식", "A05020400": "중식",
+             "A05020700": "이색음식점", "A05020900": "카페·찻집", "A05021000": "클럽"}
+
+
+def food_cat(it: dict) -> str:
+    return FOOD_CATS.get(str(it.get("cat3") or ""), "")
 
 
 def _items(data: dict) -> list[dict]:
@@ -54,7 +64,7 @@ def parse_spots(data: dict, center: tuple[float, float]) -> list[Spot]:
             km = None
         out.append(Spot(str(it.get("title", "")).strip(), str(it.get("addr1", "")).strip(),
                         str(it.get("firstimage") or it.get("firstimage2") or ""), km,
-                        str(it.get("eventstartdate") or ""), str(it.get("eventenddate") or "")))
+                        str(it.get("eventstartdate") or ""), str(it.get("eventenddate") or ""), food_cat(it)))
     return out
 
 

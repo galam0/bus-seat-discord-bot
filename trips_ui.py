@@ -14,7 +14,8 @@ log = logging.getLogger("seatbot.trips")
 KST = ZoneInfo("Asia/Seoul")
 
 book: TripBook | None = None
-_hooks: dict = {}  # start_bus, send_weather, send_tour (bot/travel 에서 넣어 줌)
+_hooks: dict = {}  # start_bus, send_weather, send_tour, send_food (bot/travel 에서 넣어 줌)
+TIMELINE_IMAGE = "schedule.png"
 
 
 def now_kst() -> datetime:
@@ -73,10 +74,12 @@ def trip_view(trip: Trip) -> discord.ui.View:
     b("참가 / 빠지기", "🙋", "join", discord.ButtonStyle.primary)
     b("일정 추가", "📝", "add")
     b("준비물", "🎒", "check")
+    b("일정표", "🗓️", "timeline")
     b("새로고침", "🔄", "refresh")
     if trip.place in PLACES:
         b("날씨", "🌤️", "weather", row=1)
         b("관광", "🏞️", "tour", row=1)
+        b("뭐먹지", "🍽️", "food", row=1)
         b("버스", "🚌", "bus", row=1)
     return v
 
@@ -177,6 +180,10 @@ async def handle_component(interaction: discord.Interaction) -> bool:
         await _hooks["send_weather"](interaction, trip.place)
     elif action == "tour":
         await _hooks["send_tour"](interaction, trip.place, "관광지")
+    elif action == "food":
+        await _hooks["send_food"](interaction, trip.place)
+    elif action == "timeline":
+        await send_timeline(interaction, trip)
     elif action == "bus":
         await interaction.response.send_modal(BusFromModal(trip))
     elif action == "check":
@@ -184,6 +191,25 @@ async def handle_component(interaction: discord.Interaction) -> bool:
             await book.add_checks(trip, DEFAULT_CHECKS, interaction.user.id)
         await interaction.response.send_message(embed=check_embed(trip), view=check_view(trip))
     return True
+
+
+# ---------------------------------------------------------------- 일정표 사진
+
+async def send_timeline(interaction: discord.Interaction, trip: Trip):
+    from trip_images import render_timeline
+
+    await interaction.response.defer(thinking=True)
+    try:
+        png = await asyncio.to_thread(render_timeline, trip, today_kst())
+    except Exception:
+        log.exception("일정표 이미지 실패")
+        await interaction.followup.send(embed=trip_embed(trip, today_kst()), view=trip_view(trip))
+        return
+    embed = discord.Embed(title=f"🗓️ {trip.name} 일정표", color=0x5B8CFF)
+    embed.set_image(url=f"attachment://{TIMELINE_IMAGE}")
+    if not trip.items:
+        embed.description = "아직 일정이 없어요. 여행 카드의 **📝 일정 추가**나 `/여행 일정추가`로 넣어 보세요."
+    await interaction.followup.send(embed=embed, file=discord.File(png, filename=TIMELINE_IMAGE))
 
 
 # ---------------------------------------------------------------- 투표
@@ -451,6 +477,17 @@ async def show_cmd(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(embed=trip_embed(trip, today_kst()), view=trip_view(trip))
 
 
+@group.command(name="일정표", description="여행 일정을 날짜별 타임라인 사진으로 보여줘요")
+@app_commands.rename(name="여행")
+@app_commands.autocomplete(name=trip_autocomplete)
+async def timeline_cmd(interaction: discord.Interaction, name: str):
+    trip = book.find(interaction.guild_id, name) if interaction.guild_id else None
+    if not trip:
+        await interaction.response.send_message("그런 여행이 없어요. 자동완성에서 골라 주세요.", ephemeral=True)
+        return
+    await send_timeline(interaction, trip)
+
+
 @group.command(name="일정추가", description="여행에 일정을 넣어요")
 @app_commands.rename(name="여행", day="날짜", text="할일", time="시간")
 @app_commands.describe(day="예: 10/25", text="예: 경포대 산책", time="예: 14:30 (없어도 돼요)")
@@ -543,7 +580,7 @@ async def delete_cmd(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(f"🗑️ **{trip.name}** 여행을 지웠어요.")
 
 
-def register(tree: app_commands.CommandTree, *, start_bus, send_weather, send_tour):
-    _hooks.update(start_bus=start_bus, send_weather=send_weather, send_tour=send_tour)
+def register(tree: app_commands.CommandTree, *, start_bus, send_weather, send_tour, send_food=None):
+    _hooks.update(start_bus=start_bus, send_weather=send_weather, send_tour=send_tour, send_food=send_food)
     tree.add_command(group)
 

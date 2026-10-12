@@ -49,10 +49,19 @@ BUS_IMAGE = "buses.png"
 SEAT_IMAGE = "seats.png"
 
 
+TEST_NOTICE = "⚠️ 지금은 **테스트 데이터**예요. 시간표·잔여석은 실제와 달라요."
+
+
+def is_test(sources: list[str] | None) -> bool:
+    return any("테스트" in s for s in sources or ())
+
+
 def bus_image_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
-                    missing: list[str] | None, page: int) -> discord.Embed:
+                    missing: list[str] | None, page: int, test: bool = False) -> discord.Embed:
     """편 목록 이미지를 붙이는 embed (글자는 머리말만)."""
     desc = f"**{bus_subtitle(day_label, trips, page)}**"
+    if test:
+        desc += f"\n{TEST_NOTICE}"
     if missing:
         desc += f"\n⚠️ {missing_text(missing)}"
     if trips:
@@ -78,6 +87,8 @@ def bus_embed(dep: str, arr: str, day_label: str, trips: list[BusTrip],
         f"{k} {n}편" for k in ("고속", "시외") if (n := sum(t.kind == k for t in trips))
     )
     head = f"**{day_label}**" + (f"  ({counts})" if counts else "") + _page_text(len(trips), page)
+    if is_test(sources):
+        head += f"\n{TEST_NOTICE}"
     if missing:
         head += f"\n⚠️ {', '.join(missing)} 조회 실패 — 일부 노선이 빠졌을 수 있어요"
     e = discord.Embed(title=f"🚌 {dep} → {arr}", description=f"{head}\n{body}")

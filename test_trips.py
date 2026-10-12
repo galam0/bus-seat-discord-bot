@@ -262,7 +262,8 @@ class TripUITest(unittest.TestCase):
         self.saved = trips_ui.book
         trips_ui.book = TripBook(MemoryStore())
         run(trips_ui.book.load())
-        self.hooks = {"start_bus": AsyncMock(), "send_weather": AsyncMock(), "send_tour": AsyncMock()}
+        self.hooks = {"start_bus": AsyncMock(), "send_weather": AsyncMock(), "send_tour": AsyncMock(),
+                      "send_food": AsyncMock()}
         trips_ui._hooks.update(self.hooks)
         p = patch.object(trips_ui, "today_kst", return_value=TODAY)
         p.start()
@@ -283,13 +284,13 @@ class TripUITest(unittest.TestCase):
         self.assertIn("D-13", kw["embed"].description)
         self.assertIn("<@7>", kw["embed"].description)
         ids = [b.custom_id for b in kw["view"].children]
-        self.assertEqual(ids, ["trip:join:1", "trip:add:1", "trip:check:1", "trip:refresh:1", "trip:weather:1",
-                               "trip:tour:1", "trip:bus:1"])
+        self.assertEqual(ids, ["trip:join:1", "trip:add:1", "trip:check:1", "trip:timeline:1", "trip:refresh:1",
+                               "trip:weather:1", "trip:tour:1", "trip:food:1", "trip:bus:1"])
         self.assertIn("임시 저장", kw["embed"].footer)  # 메모리 저장이면 알려줌
 
     def test_no_place_no_extra_buttons(self):
         i = self.create(name="미정", place=None)
-        self.assertEqual(len(i.response.send_message.await_args.kwargs["view"].children), 4)
+        self.assertEqual(len(i.response.send_message.await_args.kwargs["view"].children), 5)
 
     def test_bad_date(self):
         i = fake_interaction()
@@ -312,6 +313,16 @@ class TripUITest(unittest.TestCase):
         t = fake_interaction(custom_id="trip:tour:1")
         run(self.ui.handle_component(t))
         self.hooks["send_tour"].assert_awaited_with(t, "강릉", "관광지")
+        f = fake_interaction(custom_id="trip:food:1")
+        run(self.ui.handle_component(f))
+        self.hooks["send_food"].assert_awaited_with(f, "강릉")
+        trip = self.ui.book.trips[1]
+        run(self.ui.book.add_item(trip, trip.start_date, "14:00", "안목 커피거리", 7))
+        tl = fake_interaction(custom_id="trip:timeline:1")
+        run(self.ui.handle_component(tl))
+        kw = tl.followup.send.await_args.kwargs
+        self.assertEqual(kw["file"].filename, "schedule.png")
+        self.assertIn("일정표", kw["embed"].title)
         self.assertFalse(run(self.ui.handle_component(fake_interaction(custom_id="other:1"))))
         gone = fake_interaction(custom_id="trip:join:99")
         run(self.ui.handle_component(gone))

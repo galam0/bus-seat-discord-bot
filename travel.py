@@ -1,8 +1,9 @@
 """여행 명령어: /지하철 /노선도 /도착 /날씨, 그리고 /중간도시 결과의 버스 바로가기 버튼."""
 import asyncio
+import random
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -516,6 +517,94 @@ async def send_tour(interaction: discord.Interaction, city: str, kind: str = "�
         await interaction.followup.send(embed=embed, view=view)
 
 
+# ---------------------------------------------------------------- 뭐먹지
+
+_food_cache: dict[str, tuple[datetime, list]] = {}
+FOOD_TTL = timedelta(hours=6)
+
+
+async def _food_pool(city: str) -> list:
+    now = datetime.now(KST)
+    hit = _food_cache.get(city)
+    if hit and now - hit[0] < FOOD_TTL:
+        return hit[1]
+    sido = sido_of(city)
+    spots = await tour.fetch_spots(state.session, state.kma_key, "맛집", PLACES[city], sido[1] if sido else None,
+                                   now.date(), radius_m=10000, limit=60)
+    spots = [p for p in spots if p.title]
+    if len(_food_cache) > 100:
+        _food_cache.clear()
+    _food_cache[city] = (now, spots)
+    return spots
+
+
+def food_embed(city: str, spot, n: int) -> discord.Embed:
+    lines = [f"## {spot.title}"]
+    if spot.cat:
+        lines.append(f"🍴 {spot.cat}")
+    if spot.addr:
+        lines.append(f"📍 {spot.addr}")
+    if spot.km is not None:
+        lines.append(f"📏 {city} 중심에서 {spot.km:.1f}km")
+    e = discord.Embed(title=f"🍽️ {city}에서 뭐 먹지?", description="\n".join(lines), color=0xF0A030)
+    if spot.image:
+        e.set_image(url=spot.image)
+    e.set_footer(text=f"{city} 근처 맛집 {n}곳 중에서 뽑았어요 · 한국관광공사 · 영업시간은 가기 전에 확인하세요")
+    return e
+
+
+class FoodView(discord.ui.View):
+    def __init__(self, city: str, spot, seen: set[str]):
+        super().__init__(timeout=1800)
+        self.city, self.seen = city, seen
+        again = discord.ui.Button(label="다시 뽑기", emoji="🎲", style=discord.ButtonStyle.primary)
+        again.callback = self.reroll
+        self.add_item(again)
+        q = quote(f"{city} {spot.title}")
+        self.add_item(discord.ui.Button(label="지도", emoji="🗺️", url=f"https://map.kakao.com/link/search/{q}"))
+        more = discord.ui.Button(label="맛집 목록", emoji="📋")
+        more.callback = self.listing
+        self.add_item(more)
+
+    async def reroll(self, interaction: discord.Interaction):
+        await send_food(interaction, self.city, seen=self.seen, edit=True)
+
+    async def listing(self, interaction: discord.Interaction):
+        await send_tour(interaction, self.city, "맛집")
+
+
+async def send_food(interaction: discord.Interaction, city: str, seen: set[str] | None = None, edit: bool = False):
+    if city not in PLACES:
+        await interaction.response.send_message("자동완성 목록에서 도시를 골라주세요.", ephemeral=True)
+        return
+    if not state.kma_key:
+        await interaction.response.send_message("⚠️ 공공데이터포털 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    await (interaction.response.defer() if edit else interaction.response.defer(thinking=True))
+    try:
+        pool = await _food_pool(city)
+    except Exception as e:
+        log.warning("뭐먹지 실패: %s", str(e)[:150])
+        await interaction.followup.send(
+            f"맛집 정보를 받아오지 못했어요. 관광공사 API 활용신청이 승인됐는지 확인해 주세요. ({str(e)[:80]})",
+            ephemeral=True)
+        return
+    if not pool:
+        await interaction.followup.send(f"{city} 근처에서 맛집 정보를 못 찾았어요.", ephemeral=True)
+        return
+    seen = set(seen or ())
+    fresh = [p for p in pool if p.title not in seen] or pool
+    spot = random.choice(fresh)
+    seen.add(spot.title)
+    if len(seen) >= len(pool):
+        seen = {spot.title}
+    embed, view = food_embed(city, spot, len(pool)), FoodView(city, spot, seen)
+    if edit:
+        await interaction.edit_original_response(embed=embed, view=view)
+    else:
+        await interaction.followup.send(embed=embed, view=view)
+
+
 # ---------------------------------------------------------------- 첫차·막차
 
 _tt_cache: dict[tuple, list] = {}
@@ -752,7 +841,13 @@ async def tour_kind_autocomplete(interaction: discord.Interaction, current: str)
 
 
 def register(tree: app_commands.CommandTree, start_bus=None):
-    trips_ui.register(tree, start_bus=start_bus, send_weather=send_weather, send_tour=send_tour)
+    trips_ui.register(tree, start_bus=start_bus, send_weather=send_weather, send_tour=send_tour, send_food=send_food)
+
+    @tree.command(name="뭐먹지", description="도시 근처 맛집 하나를 랜덤으로 골라줘요 (한국관광공사)")
+    @app_commands.rename(city="도시")
+    @app_commands.autocomplete(city=city_autocomplete)
+    async def food_cmd(interaction: discord.Interaction, city: str):
+        await send_food(interaction, city)
     _start_bus_hook["fn"] = start_bus
 
     @tree.command(name="혼잡", description="서울 주요 장소의 지금 혼잡도와 앞으로 예측을 보여줘요")

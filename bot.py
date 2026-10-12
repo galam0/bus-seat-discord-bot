@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 
 from cities import CITIES, place_label, resolve_place
-from embeds import (BUS_IMAGE, SEAT_IMAGE, bus_embed, bus_image_embed, bus_subtitle,
+from embeds import (BUS_IMAGE, SEAT_IMAGE, TEST_NOTICE, is_test, bus_embed, bus_image_embed, bus_subtitle,
                     midpoint_embed, missing_text, page_range, train_embed)
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
@@ -131,7 +131,8 @@ class Flow:
                     f"출처: {' + '.join(self.sources)}",
                     notice,
                 )
-                embed = bus_image_embed(self.dep, self.arr, self.day_label, self.trips, self.missing, page)
+                embed = bus_image_embed(self.dep, self.arr, self.day_label, self.trips, self.missing, page,
+                                        test=is_test(self.sources))
                 return embed, view, [discord.File(png, filename=BUS_IMAGE)]
             except Exception:
                 log.exception("편 목록 이미지 실패, 글자로 대신 보여줌")
@@ -153,7 +154,8 @@ class Flow:
         if images is not None:
             try:
                 png = await asyncio.to_thread(images.render_seats, title, sub, t)
-                embed = discord.Embed(title=f"🪑 {title}", description=sub)
+                embed = discord.Embed(title=f"🪑 {title}",
+                                      description=sub + (f"\n{TEST_NOTICE}" if is_test(self.sources) else ""))
                 embed.set_image(url=f"attachment://{SEAT_IMAGE}")
                 await interaction.followup.send(embed=embed, file=discord.File(png, filename=SEAT_IMAGE),
                                                 ephemeral=True)

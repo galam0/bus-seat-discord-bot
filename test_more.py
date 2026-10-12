@@ -339,6 +339,91 @@ class CrowdRouletteTrainUITest(unittest.TestCase):
         self.assertIn("시간표·요금만", e.footer)
 
 
+FOOD = {"response": {"header": {"resultCode": "0000"}, "body": {"items": {"item": [
+    {"title": "가 식당", "addr1": "전북 전주시 1", "mapx": "127.15", "mapy": "35.82", "cat3": "A05020100",
+     "firstimage": "https://example.com/a.jpg"},
+    {"title": "나 카페", "addr1": "전북 전주시 2", "mapx": "127.14", "mapy": "35.81", "cat3": "A05020900"},
+    {"title": "다 국수", "addr1": "", "mapx": "127.13", "mapy": "35.80", "cat3": "Z"},
+]}}}}
+
+
+class FoodTest(unittest.TestCase):
+    def setUp(self):
+        import travel
+        self.travel = travel
+        self.saved = (travel.state.session, travel.state.kma_key)
+        travel.state.kma_key = "k"
+        travel.state.session = MagicMock()
+        travel.state.session.get = MagicMock(return_value=_Resp(FOOD))
+        travel._food_cache.clear()
+
+    def tearDown(self):
+        self.travel.state.session, self.travel.state.kma_key = self.saved
+        self.travel._food_cache.clear()
+
+    def test_parse_cat(self):
+        import tour
+        spots = tour.parse_spots(FOOD, (35.82, 127.15))
+        self.assertEqual([s.cat for s in spots], ["한식", "카페·찻집", ""])
+
+    def test_pick_and_reroll(self):
+        i = fake_interaction()
+        run(self.travel.send_food(i, "전주"))
+        kw = i.followup.send.await_args.kwargs
+        self.assertEqual(kw["embed"].title, "🍽️ 전주에서 뭐 먹지?")
+        self.assertIn("3곳 중", kw["embed"].footer)
+        labels = [b.label for b in kw["view"].children]
+        self.assertEqual(labels, ["다시 뽑기", "지도", "맛집 목록"])
+        self.assertTrue(kw["view"].children[1].url.startswith("https://map.kakao.com/link/search/"))
+        first = kw["view"].seen
+        seen_titles = set(first)
+        view = kw["view"]
+        for _ in range(2):  # 다시 뽑으면 방금 나온 곳은 안 나옴
+            r = fake_interaction()
+            run(view.reroll(r))
+            view = r.edit_original_response.await_args.kwargs["view"]
+            new = next(iter(view.seen - seen_titles), None)
+            self.assertIsNotNone(new)
+            seen_titles |= view.seen
+        self.assertEqual(self.travel.state.session.get.call_count, 1)  # 캐시
+
+    def test_not_approved(self):
+        self.travel.state.session.get = MagicMock(return_value=_Resp(
+            {"OpenAPI_ServiceResponse": {"cmmMsgHeader": {"returnAuthMsg": "등록되지 않은 서비스키"}}}))
+        i = fake_interaction()
+        run(self.travel.send_food(i, "전주"))
+        self.assertIn("활용신청", i.followup.send.await_args.args[0])
+
+    def test_unknown_city(self):
+        i = fake_interaction()
+        run(self.travel.send_food(i, "뉴욕"))
+        self.assertIn("자동완성", i.response.send_message.await_args.args[0])
+
+
+class TimelineImageTest(unittest.TestCase):
+    def test_render(self):
+        from trips import Item, Trip
+        from trip_images import _days, render_timeline
+        t = Trip(1, 1, 1, "긴 여행", "2026-10-01", "2026-10-20", "부산", 1)
+        t.items = [Item("2026-10-05", "10:00", "가" * 100, 1), Item("2026-10-05", "", "자유 시간", 1)]
+        self.assertEqual(_days(t), [date(2026, 10, 5)])  # 10일 넘으면 일정 있는 날만
+        png = render_timeline(t, date(2026, 10, 5)).read()
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        empty = Trip(2, 1, 1, "당일", "2026-10-25", "2026-10-25", "", 1)
+        self.assertTrue(render_timeline(empty, date(2026, 10, 12)).read().startswith(b"\x89PNG"))
+
+
+class BusTestNoticeTest(unittest.TestCase):
+    def test_notice(self):
+        from embeds import TEST_NOTICE, bus_embed, bus_image_embed, is_test
+        self.assertTrue(is_test(["테스트(고속)", "테스트(시외)"]))
+        self.assertFalse(is_test(["고속버스 통합예매"]))
+        e = bus_image_embed("서울", "강릉", "오늘", [], None, 0, test=True)
+        self.assertIn(TEST_NOTICE, e.description)
+        self.assertIn(TEST_NOTICE, bus_embed("서울", "강릉", "오늘", [], ["테스트(고속)"]).description)
+        self.assertNotIn(TEST_NOTICE, bus_embed("서울", "강릉", "오늘", [], ["고속버스 통합예매"]).description)
+
+
 class GuideTest(unittest.TestCase):
     def test_home_and_sections(self):
         import guide
