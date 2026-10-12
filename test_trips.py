@@ -417,13 +417,18 @@ class TravelNewCommandsTest(unittest.TestCase):
         s.session = MagicMock()
         s.session.get = MagicMock(return_value=_Resp(rows))
         i = fake_interaction()
-        with patch.object(self.travel, "datetime") as dt:
+        import cards
+        spy = MagicMock(side_effect=cards.render_last_train)
+        with patch.object(self.travel, "datetime") as dt, patch.object(self.travel.cards, "render_last_train", spy):
             dt.now.return_value = datetime(2026, 10, 12, 18, 0)
             run(self.travel.send_last_train(i, "서울"))
-        embed = i.followup.send.await_args.kwargs["embed"]
-        self.assertEqual([f[0] for f in embed.fields], ["1호선", "4호선"])
-        self.assertIn("막차 `00:05` **사당행**", embed.fields[0][1])
-        self.assertIn("평일", embed.description)
+        self.assertEqual(i.followup.send.await_args.kwargs["file"].filename, "lasttrain.png")
+        station, day_label, rows = spy.call_args.args[:3]
+        self.assertIn("평일", day_label)
+        self.assertEqual([r[0] for r in rows][:1], ["1호선"])
+        self.assertIn("4호선", [r[0] for r in rows])
+        self.assertEqual(rows[0][4][-1], ("00:05", "사당"))  # 진짜 막차가 마지막
+        self.assertEqual(rows[0][3], ("05:30", "오이도"))
         urls = [c.args[0] for c in s.session.get.call_args_list]
         self.assertTrue(any("/0150/1/1/" in u for u in urls) and any("/0426/1/2/" in u for u in urls))
 

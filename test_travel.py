@@ -321,10 +321,19 @@ class TravelCommandTest(unittest.TestCase):
         s.session = MagicMock()
         s.session.get = MagicMock(return_value=_Resp(REALTIME_SAMPLE))
         i = fake_interaction()
-        run(self.travel.send_arrivals(i, "서울"))
-        embed = i.followup.send.await_args.kwargs["embed"]
-        self.assertEqual([f[0] for f in embed.fields], ["1호선", "경의중앙선"])
+        import cards
+        spy = MagicMock(side_effect=cards.render_board)
+        with patch.object(self.travel.cards, "render_board", spy):
+            run(self.travel.send_arrivals(i, "서울"))
+        self.assertEqual(i.followup.send.await_args.kwargs["file"].filename, "arrivals.png")
+        groups = spy.call_args.args[1]
+        self.assertEqual(sorted({g[0] for g in groups}), ["1호선", "경의중앙선"])
         self.assertIn("%EC%84%9C%EC%9A%B8", s.session.get.call_args.args[0])  # 역 이름 인코딩
+        # 이미지가 안 되면 예전 글자 버전
+        j = fake_interaction()
+        with patch.object(self.travel.cards, "render_board", MagicMock(side_effect=OSError)):
+            run(self.travel.send_arrivals(j, "서울"))
+        self.assertEqual([f[0] for f in j.followup.send.await_args.kwargs["embed"].fields], ["1호선", "경의중앙선"])
 
     def test_arrivals_falls_back_to_other_key(self):
         s = self.travel.state
@@ -334,7 +343,7 @@ class TravelCommandTest(unittest.TestCase):
         s.session.get = MagicMock(side_effect=[_Resp(bad), _Resp(REALTIME_SAMPLE)])
         i = fake_interaction()
         run(self.travel.send_arrivals(i, "서울"))
-        self.assertEqual(len(i.followup.send.await_args.kwargs["embed"].fields), 2)
+        self.assertEqual(i.followup.send.await_args.kwargs["file"].filename, "arrivals.png")
         self.assertEqual(s.realtime_keys, ["right", "wrong"])  # 되는 키가 앞으로
 
     def test_arrivals_no_key(self):

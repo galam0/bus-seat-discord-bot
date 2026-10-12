@@ -20,6 +20,8 @@ import tour
 import trips_ui
 from dust import fetch_dust
 from weather_images import render_weather
+import cards
+import weekend
 import congestion
 import roulette
 from trips import MemoryStore, NeonStore, TripBook
@@ -333,6 +335,30 @@ def next_trains(arrivals, leg, limit: int = 2) -> list:
     return out[:limit]
 
 
+def _hex_rgb(h: str) -> tuple[int, int, int]:
+    v = _color_int(h)
+    return (v >> 16) & 255, (v >> 8) & 255, v & 255
+
+
+def board_groups(arrivals, per_dir: int = 2, max_groups: int = 8):
+    """노선·방향별로 묶어 전광판 줄로. [(노선, 색, '교대 방면 · 내선', [(행선지, 언제, 지금 위치)])]."""
+    groups: dict[tuple[str, str], list] = {}
+    for a in arrivals:
+        groups.setdefault((a.line, a.direction), []).append(a)
+    out = []
+    for (line, direction), items in list(groups.items())[:max_groups]:
+        head = items[0].heading
+        dest_part, _, way = head.partition(" - ")
+        label = (way.replace("방면", " 방면").strip() if way else dest_part) + (f" · {direction}" if direction else "")
+        rows = []
+        for a in items[:per_dir]:
+            dest = a.heading.partition(" - ")[0] or a.heading
+            rows.append((dest + (" 급행" if a.express else ""), a.when or a.message,
+                         f"지금 {a.where}" if a.where and a.seconds > 0 else ""))
+        out.append((line, _hex_rgb(line_color(line)), label, rows))
+    return out
+
+
 async def send_arrivals(interaction: discord.Interaction, station: str, ephemeral: bool = False):
     if not state.realtime_keys:
         await interaction.response.send_message("⚠️ 실시간 지하철 키(SEOUL_SUBWAY_KEY)가 아직 없어요.", ephemeral=True)
@@ -349,6 +375,16 @@ async def send_arrivals(interaction: discord.Interaction, station: str, ephemera
             f"**{station}** 도착 정보가 없어요. 서울 밖 역이나 운행이 끝난 시간에는 정보가 없을 수 있어요."
             + (f"\n({reason})" if reason else ""), ephemeral=True)
         return
+    try:
+        png = await asyncio.to_thread(cards.render_board, f"{station}역", board_groups(arrivals),
+                                      datetime.now(KST).strftime("%H:%M:%S 기준"))
+        e = discord.Embed(title=f"⏱️ {station}역 실시간 도착", color=_color_int(line_color(arrivals[0].line)))
+        e.set_image(url="attachment://arrivals.png")
+        e.set_footer(text="서울시 실시간 도착정보 · 실제와 1~2분 차이가 날 수 있어요")
+        await interaction.followup.send(embed=e, file=discord.File(png, filename="arrivals.png"), ephemeral=ephemeral)
+        return
+    except Exception:
+        log.exception("도착 전광판 이미지 실패")
     embed = discord.Embed(title=f"⏱️ {station}역 실시간 도착",
                           color=_color_int(line_color(arrivals[0].line)))
     groups: dict[str, list] = {}
@@ -446,6 +482,115 @@ def weather_text_embed(city, now, slots, daily, dust, dust_note) -> discord.Embe
         embed.add_field(name="공기", value=dust_note, inline=False)
     embed.set_footer(text="기상청 단기예보 · 에어코리아 · 도시 중심 기준")
     return embed
+
+
+# ---------------------------------------------------------------- 주말 날씨 비교
+
+_short_cache: dict[str, tuple[datetime, object]] = {}
+_mid_cache: dict[tuple[str, str], dict] = {}
+
+
+async def _short(city: str, now: datetime):
+    hit = _short_cache.get(city)
+    if hit and now - hit[0] < timedelta(minutes=30):
+        return hit[1]
+    lat, lon = PLACES[city]
+    fc = await fetch_forecast(state.session, state.kma_key, lat, lon, now)
+    _short_cache[city] = (now, fc)
+    return fc
+
+
+async def _mid(zone: str, tmfc: str):
+    key = (zone, tmfc)
+    if key not in _mid_cache:
+        if len(_mid_cache) > 50:
+            _mid_cache.clear()
+        _mid_cache[key] = await weekend.fetch_mid_land(state.session, state.kma_key, zone, tmfc)
+    return _mid_cache[key]
+
+
+class WeekendView(discord.ui.View):
+    """도시마다 자세한 날씨 버튼."""
+
+    def __init__(self, cities: list[str]):
+        super().__init__(timeout=1800)
+        for city in cities[:10]:
+            b = discord.ui.Button(label=city, emoji="🌤️")
+            b.callback = self._cb(city)
+            self.add_item(b)
+
+    @staticmethod
+    def _cb(city):
+        async def cb(interaction: discord.Interaction):
+            await send_weather(interaction, city)
+
+        return cb
+
+
+async def send_weekend(interaction: discord.Interaction, cities: list[str] | None = None):
+    cities = [c for c in dict.fromkeys(cities or []) if c] or list(weekend.DEFAULT_CITIES)
+    unknown = [c for c in cities if c not in PLACES]
+    if unknown:
+        await interaction.response.send_message(f"모르는 도시예요: {', '.join(unknown)}. 자동완성 목록에서 골라주세요.",
+                                                ephemeral=True)
+        return
+    if not state.kma_key:
+        await interaction.response.send_message("⚠️ 기상청 키(KMA_API_KEY)가 아직 없어요.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    now = datetime.now(KST).replace(tzinfo=None)
+    days = weekend.weekend_days(now.date())
+    tmfc = weekend.mid_tmfc(now)
+
+    async def one(city: str):
+        try:
+            fc = await _short(city, now)
+        except Exception as e:
+            log.warning("주말 날씨 단기 실패 %s: %s", city, str(e)[:120])
+            fc = None
+        out = [weekend.from_short(fc, d) if fc else None for d in days]
+        mid_err = None
+        if any(x is None for x in out):
+            sido = sido_of(city)
+            zone = weekend.mid_zone(city, sido[0] if sido else None)
+            if zone:
+                try:
+                    mid = await _mid(zone, tmfc)
+                    out = [x or mid.get(d) for x, d in zip(out, days)]
+                except Exception as e:
+                    mid_err = str(e)
+                    log.warning("중기예보 실패 %s: %s", zone, mid_err[:120])
+        return city, out, mid_err
+
+    results = await asyncio.gather(*(one(c) for c in cities))
+    rows = [(c, d) for c, d, _ in results]
+    if all(x is None for _, d in rows for x in d):
+        errs = [e for *_, e in results if e]
+        hint = (" 주말까지 3일 넘게 남으면 공공데이터포털 **'기상청_중기예보 조회서비스'** 활용신청이 필요해요."
+                if errs else "")
+        await interaction.followup.send("아직 주말 예보를 받지 못했어요." + hint, ephemeral=True)
+        return
+    best = weekend.pick_best(rows)
+    labels = [("오늘" if d == now.date() else ("내일" if d == now.date() + timedelta(days=1) else
+              f"{d.month}/{d.day}")) + f" ({WEEK[d.weekday()]})" for d in days]
+    missing_mid = any(e for *_, e in results) and any(x is None for _, d in rows for x in d)
+    note = "기상청 단기·중기예보 · 낮(9~18시) 기준" + (" · '예보 전'은 중기예보 활용신청이 필요해요" if missing_mid else "")
+    title = "이번 주말 날씨 비교" if now.weekday() < 5 else "주말 날씨 비교"
+    try:
+        png = await asyncio.to_thread(cards.render_weekend, title, labels, rows, best, note)
+    except Exception:
+        log.exception("주말 날씨 이미지 실패")
+        lines = []
+        for city, ds in rows:
+            cells = [f"{d.text} 비{d.pop or 0}%" if d else "예보 전" for d in ds]
+            lines.append(f"**{city}** " + " / ".join(cells))
+        await interaction.followup.send("\n".join(lines))
+        return
+    e = discord.Embed(title=f"🗓️ {title}", color=0x5B8CFF,
+                      description=f"날씨가 가장 좋은 곳: **{best}**" if best else None)
+    e.set_image(url="attachment://weekend.png")
+    e.set_footer(text="아래 버튼으로 도시별 자세한 날씨를 볼 수 있어요")
+    await interaction.followup.send(embed=e, file=discord.File(png, filename="weekend.png"), view=WeekendView(cities))
 
 
 # ---------------------------------------------------------------- 관광
@@ -858,6 +1003,7 @@ async def send_last_train(interaction: discord.Interaction, station: str, day: s
                           description=f"**{timetable.WEEK_NAME[week]}** 시간표 · 공휴일은 휴일 시간표를 따라요",
                           color=0x6C5CE7)
     found = False
+    card_rows = []
     for nid in sorted(ids, key=lambda i: line_sort_key(net.nodes[i].line))[:6]:
         node = net.nodes[nid]
         rows_text = []
@@ -873,6 +1019,9 @@ async def send_last_train(interaction: discord.Interaction, station: str, day: s
             found = True
             dests = "·".join(info.main_dests)
             last = info.lasts[0]
+            card_rows.append((node.line, _hex_rgb(line_color(node.line)), f"{info.label} · {dests}행 쪽",
+                              (info.first.time, info.first.dest) if info.first else None,
+                              [(d.time, d.dest) for d in reversed(info.lasts)]))
             more = ", ".join(f"{d.time} {d.dest}행" for d in info.lasts[1:])
             rows_text.append(f"**{info.label}** ({dests}행 쪽)\n"
                              f"첫차 `{info.first.time}` {info.first.dest}행 · 막차 `{last.time}` **{last.dest}행**"
@@ -882,6 +1031,17 @@ async def send_last_train(interaction: discord.Interaction, station: str, day: s
     if not found:
         embed.description += "\n\n시간표 정보가 없어요. 서울시 데이터에 없는 노선(일부 코레일·경전철 구간)일 수 있어요."
     embed.set_footer(text="서울시 지하철 역별 시간표 · 막차는 행선지가 짧을 수 있으니 '행'을 꼭 확인하세요")
+    if card_rows:
+        try:
+            png = await asyncio.to_thread(
+                cards.render_last_train, station, f"{timetable.WEEK_NAME[week]} 시간표 · 공휴일은 휴일 시간표",
+                card_rows[:10], "서울시 지하철 역별 시간표 · 막차는 행선지가 짧을 수 있으니 '행'을 꼭 확인하세요")
+            e = discord.Embed(title=f"🌙 {station}역 첫차·막차", color=0x6C5CE7)
+            e.set_image(url="attachment://lasttrain.png")
+            await interaction.followup.send(embed=e, file=discord.File(png, filename="lasttrain.png"))
+            return
+        except Exception:
+            log.exception("막차 이미지 실패")
     await interaction.followup.send(embed=embed)
 
 
@@ -930,7 +1090,20 @@ async def send_crowd(interaction: discord.Interaction, area: str):
     if crowd is None:
         await interaction.followup.send(f"**{name}** 혼잡도를 받아오지 못했어요. 잠시 후 다시 해 주세요.", ephemeral=True)
         return
-    await interaction.followup.send(embed=crowd_embed(crowd))
+    try:
+        png = await asyncio.to_thread(cards.render_crowd, crowd, congestion.LEVELS, congestion.ORDER,
+                                      congestion.fmt_people)
+    except Exception:
+        log.exception("혼잡도 이미지 실패")
+        await interaction.followup.send(embed=crowd_embed(crowd))
+        return
+    e = discord.Embed(title=f"{crowd.emoji} {crowd.area} · 지금 {crowd.level}", color=crowd.color)
+    q = crowd.quietest()
+    if q:
+        e.description = f"앞으로 가장 한산할 때: **{q.time}** ({q.level})"
+    e.set_image(url="attachment://crowd.png")
+    e.set_footer(text="서울시 실시간 도시데이터 · 휴대폰 신호로 추정한 인구예요")
+    await interaction.followup.send(embed=e, file=discord.File(png, filename="crowd.png"))
 
 
 async def area_autocomplete(interaction: discord.Interaction, current: str):
@@ -1063,6 +1236,15 @@ def register(tree: app_commands.CommandTree, start_bus=None):
     @app_commands.autocomplete(place=point_autocomplete)
     async def food_cmd(interaction: discord.Interaction, place: str):
         await send_food(interaction, place)
+
+    @tree.command(name="주말날씨", description="여러 도시의 이번 주말 날씨를 한 장으로 비교해요")
+    @app_commands.rename(a="도시1", b="도시2", c="도시3", d="도시4", e="도시5")
+    @app_commands.describe(a="비우면 강릉·속초·부산·경주·전주·여수·제주를 비교해요")
+    @app_commands.autocomplete(a=city_autocomplete, b=city_autocomplete, c=city_autocomplete,
+                               d=city_autocomplete, e=city_autocomplete)
+    async def weekend_cmd(interaction: discord.Interaction, a: str | None = None, b: str | None = None,
+                          c: str | None = None, d: str | None = None, e: str | None = None):
+        await send_weekend(interaction, [x for x in (a, b, c, d, e) if x])
 
     @tree.command(name="근처", description="역·도시·장소 근처 맛집·숙소·관광지를 가까운 순으로 보여줘요")
     @app_commands.rename(place="장소", kind="종류", radius="거리")

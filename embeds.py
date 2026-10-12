@@ -117,6 +117,18 @@ def train_embed(dep: str, arr: str, day_label: str, trips: list[TrainTrip],
     return e
 
 
+TRAIN_IMAGE = "trains.png"
+
+
+def train_subtitle(day_label: str, trips: list[TrainTrip], page: int) -> str:
+    grades = " · ".join(f"{g} {n}" for g, n in _count_grades(trips))
+    parts = [day_label, f"{len(trips)}편" + (f" ({grades})" if grades else "")]
+    pages = page_count(len(trips))
+    if pages > 1:
+        parts.append(f"{min(max(page, 0), pages - 1) + 1}/{pages}쪽")
+    return " · ".join(parts)
+
+
 def _duration(dep: str, arr: str) -> str:
     try:
         a = int(dep[:2]) * 60 + int(dep[3:5])

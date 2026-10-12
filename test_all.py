@@ -304,6 +304,14 @@ class EmbedTest(unittest.TestCase):
         self.assertIn("고속 1편 · 시외 1편", e.description)
         self.assertIn("버스타고 조회 실패", e.description)
 
+    def test_midpoint_image(self):
+        import cards
+        from cities import PLACES
+        from midpoint import fmt_minutes
+        for origins in (["서울", "부산"], ["서울", "부산", "광주", "강릉", "진주"]):
+            png = cards.render_midpoint(origins, find_midpoints(origins), PLACES, fmt_minutes).read()
+            self.assertTrue(png.startswith(b"\x89PNG"))
+
     def test_midpoint_embed(self):
         e = midpoint_embed(["서울", "부산"], find_midpoints(["서울", "부산"]))
         self.assertEqual(len(e.fields), 3)
@@ -387,7 +395,7 @@ class FlowTest(unittest.TestCase):
 class CommandRegistrationTest(unittest.TestCase):
     def test_commands_registered(self):
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"버스", "기차", "중간도시", "지하철", "노선도", "도착", "날씨", "관광", "막차", "여행", "혼잡", "어디가지", "도움말", "뭐먹지", "근처"})
+        self.assertEqual(names, {"버스", "기차", "중간도시", "지하철", "노선도", "도착", "날씨", "관광", "막차", "여행", "혼잡", "어디가지", "도움말", "뭐먹지", "근처", "주말날씨"})
 
     def test_help_covers_every_command(self):
         import guide

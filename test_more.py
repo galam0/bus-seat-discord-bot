@@ -284,8 +284,12 @@ class CrowdRouletteTrainUITest(unittest.TestCase):
         s.session.get = MagicMock(return_value=_Resp(CROWD))
         i = fake_interaction()
         run(self.travel.send_crowd(i, "홍대 관광특구"))
-        e = i.followup.send.await_args.kwargs["embed"]
-        self.assertIn("지금 보통", e.title)
+        kw = i.followup.send.await_args.kwargs
+        self.assertIn("지금 보통", kw["embed"].title)
+        self.assertIn("03시", kw["embed"].description)  # 가장 한산할 때
+        self.assertEqual(kw["file"].filename, "crowd.png")
+        # 글자 버전(이미지 실패 때)
+        e = self.travel.crowd_embed(congestion.parse_crowd(CROWD))
         self.assertIn("8.2만~8.4만명", e.description)
         self.assertEqual(e.fields[0][0], "앞으로 6시간")
         self.assertIn("03시", e.fields[1][1])
@@ -498,6 +502,124 @@ class BusTestNoticeTest(unittest.TestCase):
         self.assertIn(TEST_NOTICE, e.description)
         self.assertIn(TEST_NOTICE, bus_embed("서울", "강릉", "오늘", [], ["테스트(고속)"]).description)
         self.assertNotIn(TEST_NOTICE, bus_embed("서울", "강릉", "오늘", [], ["고속버스 통합예매"]).description)
+
+
+MID = {"response": {"header": {"resultCode": "00"}, "body": {"items": {"item": [{
+    "regId": "11D20000", "rnSt4Am": 20, "rnSt4Pm": 30, "rnSt5Am": 60, "rnSt5Pm": 70,
+    "wf4Am": "맑음", "wf4Pm": "구름많음", "wf5Am": "흐리고 비", "wf5Pm": "흐림", "rnSt8": 40, "wf8": "흐림"}]}}}}
+
+
+class WeekendTest(unittest.TestCase):
+    def test_days(self):
+        import weekend
+        self.assertEqual(weekend.weekend_days(date(2026, 10, 12)), [date(2026, 10, 17), date(2026, 10, 18)])  # 월
+        self.assertEqual(weekend.weekend_days(date(2026, 10, 17)), [date(2026, 10, 17), date(2026, 10, 18)])  # 토
+        self.assertEqual(weekend.weekend_days(date(2026, 10, 18)), [date(2026, 10, 18)])  # 일
+
+    def test_zone_and_tmfc(self):
+        import weekend
+        from datetime import datetime
+        self.assertEqual(weekend.mid_zone("강릉", "강원"), "11D20000")
+        self.assertEqual(weekend.mid_zone("춘천", "강원"), "11D10000")
+        self.assertEqual(weekend.mid_zone("여수", "전남"), "11F20000")
+        self.assertEqual(weekend.mid_tmfc(datetime(2026, 10, 12, 21)), "202610121800")
+        self.assertEqual(weekend.mid_tmfc(datetime(2026, 10, 12, 9)), "202610120600")
+        self.assertEqual(weekend.mid_tmfc(datetime(2026, 10, 12, 3)), "202610111800")
+
+    def test_parse_mid(self):
+        import weekend
+        days = weekend.parse_mid_land(MID, "202610130600")
+        self.assertEqual((days[date(2026, 10, 17)].text, days[date(2026, 10, 17)].pop), ("구름많음", 30))
+        self.assertEqual((days[date(2026, 10, 18)].text, days[date(2026, 10, 18)].pop), ("비", 70))
+        self.assertEqual(days[date(2026, 10, 21)].text, "흐림")
+        with self.assertRaises(RuntimeError):
+            weekend.parse_mid_land({"OpenAPI_ServiceResponse": {"cmmMsgHeader": {"returnAuthMsg": "등록되지 않은"}}}, "x")
+
+    def test_from_short_and_best(self):
+        import weekend
+        from datetime import datetime
+        from weather import Forecast, Slot
+        sat = date(2026, 10, 17)
+        slots = [Slot(datetime(2026, 10, 17, h), 10.0 + h / 2, "", "맑음" if h < 15 else "비", 60 if h >= 15 else 0)
+                 for h in range(0, 24)]
+        fc = Forecast(slots, {"20261017": (8.0, 19.0)})
+        d = weekend.from_short(fc, sat)
+        self.assertEqual((d.text, d.pop, d.lo, d.hi, d.source), ("비", 60, 8.0, 19.0, "단기"))
+        self.assertIsNone(weekend.from_short(fc, date(2026, 10, 18)))
+        good, bad = weekend.Day("맑음", 0, None, None, "중기"), weekend.Day("비", 80, None, None, "중기")
+        self.assertEqual(weekend.pick_best([("A", [bad, bad]), ("B", [good, bad]), ("C", [good, None])]), "B")
+
+    def test_command_uses_mid_when_short_misses(self):
+        import travel
+        from datetime import datetime
+        from weather import Forecast
+        saved = (travel.state.kma_key, travel.state.session)
+        travel.state.kma_key = "k"
+        travel.state.session = MagicMock()
+        travel.state.session.get = MagicMock(return_value=_Resp(MID))
+        travel._short_cache.clear()
+        travel._mid_cache.clear()
+        try:
+            with patch.object(travel, "fetch_forecast", AsyncMock(return_value=Forecast([], {}))), \
+                    patch.object(travel, "datetime") as dt:
+                dt.now.return_value = datetime(2026, 10, 13, 10, 0)  # 화요일 -> 주말은 중기
+                dt.strptime = datetime.strptime
+                i = fake_interaction()
+                run(travel.send_weekend(i, ["강릉", "부산"]))
+            kw = i.followup.send.await_args.kwargs
+            self.assertEqual(kw["file"].filename, "weekend.png")
+            self.assertEqual([b.label for b in kw["view"].children], ["강릉", "부산"])
+            params = travel.state.session.get.call_args.kwargs["params"]
+            self.assertEqual(params["tmFc"], "202610130600")
+        finally:
+            travel.state.kma_key, travel.state.session = saved
+
+    def test_command_mid_not_approved(self):
+        import travel
+        from datetime import datetime
+        from weather import Forecast
+        saved = (travel.state.kma_key, travel.state.session)
+        travel.state.kma_key = "k"
+        travel.state.session = MagicMock()
+        travel.state.session.get = MagicMock(return_value=_Resp(
+            {"OpenAPI_ServiceResponse": {"cmmMsgHeader": {"returnAuthMsg": "등록되지 않은 서비스키"}}}))
+        travel._short_cache.clear()
+        travel._mid_cache.clear()
+        try:
+            with patch.object(travel, "fetch_forecast", AsyncMock(return_value=Forecast([], {}))), \
+                    patch.object(travel, "datetime") as dt:
+                dt.now.return_value = datetime(2026, 10, 13, 10, 0)
+                i = fake_interaction()
+                run(travel.send_weekend(i, ["강릉"]))
+            self.assertIn("중기예보", i.followup.send.await_args.args[0])
+            bad = fake_interaction()
+            run(travel.send_weekend(bad, ["뉴욕"]))
+            self.assertIn("모르는 도시", bad.response.send_message.await_args.args[0])
+        finally:
+            travel.state.kma_key, travel.state.session = saved
+
+
+class CardRenderTest(unittest.TestCase):
+    def test_all_cards_render(self):
+        import cards
+        from models import TrainTrip
+        from weekend import Day
+        trips = [TrainTrip("KTX 101", "05:13", "07:51", grade="KTX", fare=59800),
+                 TrainTrip("KTX 103", "06:00", "08:40", "예약가능", "매진")]
+        pngs = [
+            cards.render_trains("서울 → 부산", "오늘", trips, "출처"),
+            cards.render_trains("서울 → 부산", "오늘", [], "출처"),
+            cards.render_board("강남역", [("2호선", (0, 160, 70), "교대 방면 · 내선", [("성수행", "3분 후", "지금 역삼")]),
+                                       ("신분당선", (210, 0, 60), "양재 방면", [])], "21:00 기준"),
+            cards.render_last_train("강남", "평일", [("2호선", (0, 160, 70), "내선순환", ("05:30", "성수"),
+                                                      [("00:21", "홍대입구"), ("00:46", "서울대입구")]),
+                                                     ("2호선", (0, 160, 70), "외선순환", None, [])]),
+            cards.render_weekend("주말", ["토", "일"], [("강릉", [Day("맑음", 0, 1.0, 9.0, "단기"), None])], "강릉"),
+            cards.render_crowd(congestion.parse_crowd(CROWD), congestion.LEVELS, congestion.ORDER,
+                               congestion.fmt_people),
+        ]
+        for p in pngs:
+            self.assertTrue(p.read().startswith(b"\x89PNG"))
 
 
 class GuideTest(unittest.TestCase):

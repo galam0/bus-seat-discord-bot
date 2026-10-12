@@ -576,6 +576,8 @@ class Arrival:
     message: str  # '3분 후 (OO)' / '전역 도착'
     seconds: int
     express: bool
+    when: str = ""  # '3분 후' / '전역 도착' (전광판용 짧은 글자)
+    where: str = ""  # 지금 열차가 있는 역
 
 
 def realtime_code(data: dict) -> str:
@@ -592,13 +594,15 @@ def parse_arrivals(data: dict) -> list[Arrival]:
             secs = 0
         line = SUBWAY_ID.get(str(r.get("subwayId")), str(r.get("subwayId")))
         msg = str(r.get("arvlMsg2") or "").strip()
+        where = str(r.get("arvlMsg3") or "").strip()
+        when = msg
         if secs > 0:
             m, s = divmod(secs, 60)
             msg = f"{m}분 {s}초 후" if m else f"{s}초 후"
-            where = str(r.get("arvlMsg3") or "").strip()
+            when = f"{m + (1 if s >= 30 else 0)}분 후" if m else "곧 도착"
             if where:
                 msg += f" ({where})"
         out.append(Arrival(line, str(r.get("updnLine") or ""), str(r.get("trainLineNm") or ""),
-                           msg, secs, str(r.get("btrainSttus") or "") in ("급행", "ITX", "특급")))
+                           msg, secs, str(r.get("btrainSttus") or "") in ("급행", "ITX", "특급"), when, where))
     out.sort(key=lambda a: (line_sort_key(a.line), a.direction, a.seconds))
     return out

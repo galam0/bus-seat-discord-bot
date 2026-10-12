@@ -9,7 +9,8 @@ from discord import app_commands
 
 from cities import CITIES, place_label, resolve_place
 from embeds import (BUS_IMAGE, SEAT_IMAGE, TEST_NOTICE, is_test, bus_embed, bus_image_embed, bus_subtitle,
-                    midpoint_embed, missing_text, page_range, train_embed)
+                    midpoint_embed, missing_text, page_range, train_embed,
+                    TRAIN_IMAGE, train_subtitle)
 from midpoint import find_midpoints
 from providers import ProviderUnavailable, get_bus_provider, get_train_provider
 from seatmap import render_seat_map
@@ -112,6 +113,21 @@ class Flow:
         """(embed, view, 첨부 파일들). 버스는 편 목록을 이미지로, 못 만들면 글자로."""
         if self.kind == "train":
             view = ResultView(self.owner_id, self.back, trips=self.trips, page=page, on_page=self.turn)
+            if self.trips:
+                try:
+                    import cards
+                    start, end = page_range(len(self.trips), view.page)
+                    png = await asyncio.to_thread(
+                        cards.render_trains, f"{self.dep} → {self.arr}",
+                        train_subtitle(self.day_label, self.trips, view.page), self.trips[start:end],
+                        f"출처: {self.provider.label} · " + ("잔여석은 공개 데이터에 없어서 시간표·요금만 보여요"
+                                                          if not self.trips[0].general else "테스트 데이터"))
+                    embed = discord.Embed(title=f"🚆 {self.dep} → {self.arr}",
+                                          description=f"**{train_subtitle(self.day_label, self.trips, view.page)}**")
+                    embed.set_image(url=f"attachment://{TRAIN_IMAGE}")
+                    return embed, view, [discord.File(png, filename=TRAIN_IMAGE)]
+                except Exception:
+                    log.exception("기차 이미지 실패, 글자로 대신 보여줌")
             embed = train_embed(self.dep, self.arr, self.day_label, self.trips,
                                 self.provider.label, view.page)
             return embed, view, []
@@ -291,7 +307,21 @@ async def mid_cmd(interaction: discord.Interaction, a: str, b: str,
         await interaction.response.send_message(str(err), ephemeral=True)
         return
     view = travel.MidpointBusView(origins, cands[0].city, lambda i, dep, arr: _start(i, "bus", dep, arr))
-    await interaction.response.send_message(embed=midpoint_embed(origins, cands), view=view)
+    await interaction.response.defer(thinking=True)
+    try:
+        import cards
+        from cities import PLACES
+        from midpoint import fmt_minutes
+        png = await asyncio.to_thread(cards.render_midpoint, origins, cands, PLACES, fmt_minutes)
+    except Exception:
+        log.exception("중간도시 지도 실패, 글자로 대신 보여줌")
+        await interaction.followup.send(embed=midpoint_embed(origins, cands), view=view)
+        return
+    e = discord.Embed(title=f"📍 모이기 좋은 곳: {cands[0].city}",
+                      description="출발지: " + " · ".join(dict.fromkeys(origins)))
+    e.set_image(url="attachment://midpoint.png")
+    e.set_footer(text="직선거리 기반 추정이에요. 정확한 시간과 잔여석은 /버스로 확인하세요.")
+    await interaction.followup.send(embed=e, file=discord.File(png, filename="midpoint.png"), view=view)
 
 
 travel.register(tree, start_bus=lambda i, dep, arr: _start(i, "bus", dep, arr))
